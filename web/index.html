@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0B0F19" />
+  <meta name="referrer" content="no-referrer" />
+  <title>OnionShield — Privacy Portal &amp; Android APK</title>
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <img src="/icon.svg" alt="OnionShield" class="brand-logo" />
+        <div>
+          <span class="brand-title">OnionShield</span>
+          <span class="brand-sub">Privacy Portal &amp; Web Companion</span>
+        </div>
+      </div>
+
+      <div class="mode-switch" role="group" aria-label="Browser Mode">
+        <button id="btnSurfaceMode" class="mode-btn active-surface" type="button">Surface Web</button>
+        <button id="btnTorMode" class="mode-btn" type="button">Tor .onion</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- Hero + Private Omnibox -->
+      <section class="hero-card" id="heroCard">
+        <div class="hero-badge" id="modeBadge">
+          <span class="dot"></span>
+          <span id="modeBadgeText">SURFACE WEB PRIVATE LAUNCHER</span>
+        </div>
+        <h1>Browse &amp; Audit Safely Everywhere</h1>
+        <p class="hero-desc">
+          Vercel-hosted PWA companion for private search, URL tracker stripping, real-time WebRTC &amp; fingerprint auditing, and downloading the native OnionShield Android APK.
+        </p>
+
+        <form id="searchForm" class="omnibox">
+          <select id="searchEngine" aria-label="Search Engine">
+            <option value="ddg">DuckDuckGo</option>
+            <option value="startpage">Startpage</option>
+            <option value="brave">Brave Search</option>
+          </select>
+          <input
+            id="omniboxInput"
+            type="text"
+            placeholder="Search privately or paste https:// / .onion URL…"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button type="submit" class="primary-btn">Go</button>
+        </form>
+
+        <div id="onionAlert" class="notice-banner hidden">
+          <strong>Tor / .onion Mode Selected:</strong> Standard web browsers on Vercel cannot directly tunnel over Tor SOCKS5 (<code>127.0.0.1:9050</code>). For full <code>.onion</code> browsing, No-Script WebView, and WebRTC blocking, install the <strong>OnionShield Android APK</strong> with Orbot below.
+        </div>
+      </section>
+
+      <!-- Two Column Grid -->
+      <section class="grid-two">
+        <!-- Real-Time Browser Privacy Audit -->
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Browser Leak &amp; Fingerprint Audit</h2>
+              <p class="muted">Real checks executed on your current browser</p>
+            </div>
+            <button id="btnRunAudit" class="secondary-btn" type="button">Run Audit</button>
+          </div>
+          <div id="auditResults" class="audit-list"></div>
+        </article>
+
+        <!-- URL Tracker Stripper -->
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Tracking Parameter Stripper</h2>
+              <p class="muted">Removes utm_*, fbclid, gclid, igshid &amp; upgrades HTTP → HTTPS</p>
+            </div>
+          </div>
+          <div class="sanitizer-box">
+            <input
+              id="dirtyUrlInput"
+              type="url"
+              placeholder="Paste tracking URL (e.g. http://site.com/?utm_source=...&fbclid=...)"
+            />
+            <div class="sanitizer-actions">
+              <button id="btnCleanUrl" class="primary-btn" type="button">Sanitize URL</button>
+              <button id="btnCopyClean" class="secondary-btn" type="button">Copy</button>
+              <button id="btnOpenClean" class="secondary-btn" type="button">Open</button>
+            </div>
+            <div id="cleanUrlOutput" class="mono-output">Sanitized URL will appear here…</div>
+          </div>
+        </article>
+      </section>
+
+      <!-- Android APK Download from GitHub Releases -->
+      <section class="panel apk-panel">
+        <div class="panel-header">
+          <div>
+            <h2>Download OnionShield Android APK</h2>
+            <p class="muted">
+              অ্যান্ড্রয়েড ফোনে সম্পূর্ণ Tor (<code>127.0.0.1:9050</code>), No-Script ও WebView প্রাইভেসি ব্যবহারের জন্য GitHub Release থেকে APK ডাউনলোড করুন।
+            </p>
+          </div>
+          <button id="btnInstallPwa" class="secondary-btn hidden" type="button">Install Web App</button>
+        </div>
+
+        <div class="repo-fetch-row">
+          <input
+            id="githubRepoInput"
+            type="text"
+            placeholder="GitHub repository (e.g. username/OnionShield)"
+            aria-label="GitHub repository owner/name"
+          />
+          <button id="btnFetchRelease" class="primary-btn" type="button">Fetch Latest APK</button>
+        </div>
+        <div id="releaseStatus" class="release-status">
+          Enter your GitHub <code>owner/repo</code> after publishing a release tag (<code>v1.0.0</code>) to pull the direct APK download link and SHA-256 checksum.
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>OnionShield • Zero Telemetry • No-Referrer • Client-Side Only</span>
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

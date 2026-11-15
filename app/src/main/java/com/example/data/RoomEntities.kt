@@ -1,0 +1,35 @@
+package com.example.data
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+@Entity(tableName = "bookmarks")
+data class BookmarkEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val url: String,
+    val isOnion: Boolean,
+    val createdAt: Long = System.currentTimeMillis(),
+)
+
+@Entity(tableName = "history_entries")
+data class HistoryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val url: String,
+    val isOnion: Boolean,
+    val visitedAt: Long = System.currentTimeMillis(),
+)
+
+@Entity(tableName = "downloads")
+data class DownloadEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val fileName: String,
+    val url: String,
+    val mimeType: String,
+    val status: String, // COMPLETED, DOWNLOADING, CANCELLED, FAILED
+    val systemDownloadId: Long = -1L,
+    val isOnionSource: Boolean = false,
+    val sizeBytes: Long = 0L,
+    val createdAt: Long = System.currentTimeMillis(),
+)
