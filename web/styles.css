@@ -227,6 +227,65 @@ input:focus {
   line-height: 1.45;
 }
 
+.install-guide-banner {
+  margin-top: 0;
+  padding: 0 14px;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  border-width: 0;
+  transform: translateY(-8px);
+  pointer-events: none;
+  visibility: hidden;
+  transition:
+    max-height 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.32s ease,
+    transform 0.36s cubic-bezier(0.22, 1, 0.36, 1),
+    margin-top 0.36s ease,
+    padding 0.36s ease,
+    border-width 0.2s ease,
+    visibility 0s linear 0.42s;
+}
+
+.install-guide-banner.is-visible {
+  margin-top: 14px;
+  padding: 12px 14px;
+  max-height: 240px;
+  opacity: 1;
+  border-width: 1px;
+  transform: translateY(0);
+  pointer-events: auto;
+  visibility: visible;
+  transition:
+    max-height 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.32s ease 0.06s,
+    transform 0.36s cubic-bezier(0.22, 1, 0.36, 1),
+    margin-top 0.36s ease,
+    padding 0.36s ease,
+    border-width 0.15s ease,
+    visibility 0s linear 0s;
+}
+
+.install-guide-banner.prompt-ready {
+  background: rgba(0, 229, 209, 0.12);
+  border-color: rgba(0, 229, 209, 0.45);
+}
+
+.install-guide-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .install-guide-banner,
+  .install-guide-banner.is-visible {
+    transition: none;
+  }
+}
+
 .hidden {
   display: none !important;
 }

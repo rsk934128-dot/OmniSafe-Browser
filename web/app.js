@@ -196,44 +196,79 @@
 
   btnRunAudit.addEventListener('click', runPrivacyAudit);
 
-  const savedRepo = localStorage.getItem('onionshield_github_repo');
-  if (savedRepo) {
-    githubRepoInput.value = savedRepo;
-  }
+  const DEFAULT_GITHUB_REPO = 'rsk934128-dot/OmniSafe-Browser';
+  const savedRepo = localStorage.getItem('onionshield_github_repo') || DEFAULT_GITHUB_REPO;
+  githubRepoInput.value = savedRepo;
 
-  btnFetchRelease.addEventListener('click', async () => {
-    const repo = githubRepoInput.value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\/$/, '');
+  async function fetchLatestRelease(rawRepo, savePreference = false) {
+    const repo = String(rawRepo || '')
+      .trim()
+      .replace(/^https?:\/\/github\.com\//i, '')
+      .replace(/\/$/, '');
+
     if (!repo.includes('/')) {
       releaseStatus.textContent = 'Please enter a valid GitHub repository in owner/repo format.';
       apkQrContainer.classList.add('hidden');
       return;
     }
-    localStorage.setItem('onionshield_github_repo', repo);
+
+    if (savePreference) {
+      localStorage.setItem('onionshield_github_repo', repo);
+    }
+
     releaseStatus.textContent = `Fetching latest release from github.com/${repo}…`;
     apkQrContainer.classList.add('hidden');
 
     try {
       const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`);
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status} — ensure a release tag (e.g. v1.0.0) has been published.`);
+        if (res.status === 404) {
+          throw new Error('No published GitHub Release found yet. Trigger "Release Android APK" in GitHub Actions or push a tag (e.g. v1.0.0).');
+        }
+        throw new Error(`HTTP ${res.status} — could not query GitHub Releases.`);
       }
+
       const data = await res.json();
-      const apkAsset = (data.assets || []).find((a) => a.name.endsWith('.apk'));
-      const shaAsset = (data.assets || []).find((a) => a.name.endsWith('.sha256'));
+      const apkAsset = (data.assets || []).find((a) => a.name && a.name.endsWith('.apk'));
+      const shaAsset = (data.assets || []).find((a) => a.name && a.name.endsWith('.sha256'));
 
       if (!apkAsset) {
-        releaseStatus.innerHTML = `Release <strong>${data.tag_name}</strong> found, but no <code>.apk</code> asset is attached yet.`;
+        releaseStatus.textContent = `Release ${data.tag_name || 'latest'} found on ${repo}, but no .apk asset is attached yet.`;
         return;
       }
 
       latestApkUrl = apkAsset.browser_download_url;
       latestReleaseTag = data.tag_name || 'latest';
 
-      releaseStatus.innerHTML = `
-        <div><strong>Latest Release:</strong> ${latestReleaseTag} (${(apkAsset.size / (1024 * 1024)).toFixed(2)} MB)</div>
-        <a class="apk-download-btn" href="${latestApkUrl}" rel="noopener">Download ${apkAsset.name}</a>
-        ${shaAsset ? `<a class="secondary-btn" style="display:inline-block;text-decoration:none;margin-top:10px;" href="${shaAsset.browser_download_url}" rel="noopener">SHA-256</a>` : ''}
-      `;
+      releaseStatus.textContent = '';
+
+      const metaDiv = document.createElement('div');
+      const strong = document.createElement('strong');
+      strong.textContent = 'Latest Release: ';
+      metaDiv.appendChild(strong);
+      metaDiv.appendChild(
+        document.createTextNode(`${latestReleaseTag} (${(apkAsset.size / (1024 * 1024)).toFixed(2)} MB)`)
+      );
+      releaseStatus.appendChild(metaDiv);
+
+      const apkLink = document.createElement('a');
+      apkLink.className = 'apk-download-btn';
+      apkLink.href = latestApkUrl;
+      apkLink.rel = 'noopener noreferrer';
+      apkLink.textContent = `Download ${apkAsset.name}`;
+      releaseStatus.appendChild(apkLink);
+
+      if (shaAsset) {
+        const shaLink = document.createElement('a');
+        shaLink.className = 'secondary-btn';
+        shaLink.style.display = 'inline-block';
+        shaLink.style.textDecoration = 'none';
+        shaLink.style.marginTop = '10px';
+        shaLink.href = shaAsset.browser_download_url;
+        shaLink.rel = 'noopener noreferrer';
+        shaLink.textContent = 'SHA-256';
+        releaseStatus.appendChild(shaLink);
+      }
 
       if (window.OnionShieldQR && apkQrCanvas) {
         window.OnionShieldQR.renderToCanvas(apkQrCanvas, latestApkUrl, {
@@ -248,6 +283,10 @@
     } catch (err) {
       releaseStatus.textContent = `Could not fetch release: ${err.message}`;
     }
+  }
+
+  btnFetchRelease.addEventListener('click', () => {
+    fetchLatestRelease(githubRepoInput.value, true);
   });
 
   btnCopyApkLink.addEventListener('click', async () => {
@@ -265,23 +304,89 @@
     link.click();
   });
 
+  const pwaInstallGuide = document.getElementById('pwaInstallGuide');
+  const pwaInstallGuideText = document.getElementById('pwaInstallGuideText');
+  const btnGuideInstallNow = document.getElementById('btnGuideInstallNow');
+
+  function setInstallGuideVisible(visible, promptReady = false) {
+    if (!pwaInstallGuide) return;
+    pwaInstallGuide.classList.toggle('prompt-ready', promptReady);
+    pwaInstallGuide.classList.toggle('is-visible', visible);
+    pwaInstallGuide.setAttribute('aria-hidden', visible ? 'false' : 'true');
+  }
+
+  async function triggerPwaInstallPrompt() {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    const choice = await deferredPrompt.userChoice;
+    deferredPrompt = null;
+    if (btnGuideInstallNow) {
+      btnGuideInstallNow.classList.add('hidden');
+    }
+    if (choice && choice.outcome === 'accepted') {
+      if (btnInstallPwa) {
+        btnInstallPwa.textContent = 'Web App Installed';
+      }
+      setInstallGuideVisible(false, false);
+    } else {
+      setInstallGuideVisible(false, false);
+    }
+  }
+
+  if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches && btnInstallPwa) {
+    btnInstallPwa.textContent = 'Web App Installed';
+  }
+
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
     deferredPrompt = e;
-    btnInstallPwa.classList.remove('hidden');
+    if (btnInstallPwa) {
+      btnInstallPwa.textContent = 'Install Web App';
+    }
+    if (pwaInstallGuideText) {
+      pwaInstallGuideText.innerHTML =
+        '<strong>Install OnionShield Web App:</strong> আপনার ডিভাইসের Home Screen-এ যুক্ত করে অ্যাপের মতো দ্রুত ব্যবহার করুন।';
+    }
+    if (btnGuideInstallNow) {
+      btnGuideInstallNow.classList.remove('hidden');
+    }
+    requestAnimationFrame(() => {
+      setInstallGuideVisible(true, true);
+    });
   });
 
-  btnInstallPwa.addEventListener('click', async () => {
-    if (!deferredPrompt) return;
-    deferredPrompt.prompt();
-    await deferredPrompt.userChoice;
+  window.addEventListener('appinstalled', () => {
     deferredPrompt = null;
-    btnInstallPwa.classList.add('hidden');
+    if (btnInstallPwa) {
+      btnInstallPwa.textContent = 'Web App Installed';
+    }
+    if (btnGuideInstallNow) {
+      btnGuideInstallNow.classList.add('hidden');
+    }
+    setInstallGuideVisible(false, false);
   });
+
+  if (btnGuideInstallNow) {
+    btnGuideInstallNow.addEventListener('click', triggerPwaInstallPrompt);
+  }
+
+  if (btnInstallPwa) {
+    btnInstallPwa.addEventListener('click', async () => {
+      if (deferredPrompt) {
+        await triggerPwaInstallPrompt();
+        return;
+      }
+      if (pwaInstallGuide) {
+        const nextVisible = !pwaInstallGuide.classList.contains('is-visible');
+        setInstallGuideVisible(nextVisible, false);
+      }
+    });
+  }
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
 
   runPrivacyAudit();
+  fetchLatestRelease(savedRepo, false);
 })();

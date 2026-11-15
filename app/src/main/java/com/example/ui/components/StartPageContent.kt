@@ -23,7 +23,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AddToHomeScreen
 import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CodeOff
 import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.Https
@@ -35,14 +38,21 @@ import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.TravelExplore
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,14 +60,18 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.browser.TrackerAndUrlEngine
 import com.example.R
 import com.example.data.BrowserMode
 import com.example.data.BrowserTab
+import com.example.data.PinnedAppEntity
 import com.example.data.SecurityConfig
 import com.example.data.TorProxyState
 import com.example.ui.theme.LocalShieldColors
@@ -109,7 +123,10 @@ fun StartPageContent(
     torProxyState: TorProxyState,
     totalTrackersBlocked: Int,
     totalScriptsBlocked: Int,
+    pinnedApps: List<PinnedAppEntity> = emptyList(),
     onNavigateUrl: (String) -> Unit,
+    onInstallHomeApp: (title: String, url: String) -> Unit = { _, _ -> },
+    onRemovePinnedApp: (Long) -> Unit = {},
     onToggleNoScript: (Boolean) -> Unit,
     onToggleHttpsEverywhere: (Boolean) -> Unit,
     onToggleWebRtc: (Boolean) -> Unit,
@@ -124,6 +141,8 @@ fun StartPageContent(
         targetValue = if (isTor) shieldColors.torAccent else shieldColors.surfaceAccent,
         label = "modeAccent",
     )
+    var isEditingApps by remember { mutableStateOf(false) }
+    var showInstallAppDialog by remember { mutableStateOf(false) }
 
     val activeShieldCount = listOf(
         config.noScriptEnabled,
@@ -377,6 +396,200 @@ fun StartPageContent(
             }
         }
 
+        // Home Apps & PWAs Launcher Grid
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 640.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.AddToHomeScreen,
+                            contentDescription = "Home Apps & PWAs",
+                            tint = accentColor,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text(
+                            text = "Home Apps & PWAs",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground,
+                        )
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (pinnedApps.isNotEmpty()) {
+                            Text(
+                                text = if (isEditingApps) "Done" else "Edit",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { isEditingApps = !isEditingApps }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    .testTag("home_apps_edit_button"),
+                            )
+                        }
+                        Surface(
+                            shape = CircleShape,
+                            color = accentColor.copy(alpha = 0.16f),
+                            border = BorderStroke(1.dp, accentColor.copy(alpha = 0.5f)),
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .clickable { showInstallAppDialog = true }
+                                .testTag("install_home_app_button"),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Add,
+                                    contentDescription = "Install Home App",
+                                    tint = accentColor,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                                Text(
+                                    text = "Install App",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = accentColor,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (pinnedApps.isEmpty()) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(MaterialTheme.shapes.medium)
+                            .clickable { showInstallAppDialog = true },
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+                    ) {
+                        Text(
+                            text = "Tap + Install App to pin any website (YouTube, News, Web Apps) to Home Apps & your phone Home Screen.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(14.dp),
+                        )
+                    }
+                } else {
+                    pinnedApps.chunked(4).forEach { rowItems ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            rowItems.forEach { app ->
+                                val tileAccent = if (app.isOnion) shieldColors.torAccent else accentColor
+                                val badgeLetters = app.title.trim()
+                                    .split(" ")
+                                    .filter { it.isNotBlank() }
+                                    .take(2)
+                                    .joinToString("") { it.first().uppercaseChar().toString() }
+                                    .ifBlank { "APP" }
+                                Surface(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(MaterialTheme.shapes.medium)
+                                        .clickable {
+                                            if (isEditingApps) {
+                                                onRemovePinnedApp(app.id)
+                                            } else {
+                                                onNavigateUrl(app.url)
+                                            }
+                                        }
+                                        .testTag("home_app_tile_${app.id}"),
+                                    shape = MaterialTheme.shapes.medium,
+                                    color = MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isEditingApps) MaterialTheme.colorScheme.error.copy(alpha = 0.6f)
+                                        else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                                    ),
+                                ) {
+                                    Box(modifier = Modifier.padding(vertical = 10.dp, horizontal = 6.dp)) {
+                                        if (isEditingApps) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .align(Alignment.TopCenter),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.AddToHomeScreen,
+                                                    contentDescription = "Pin ${app.title} to Phone Home",
+                                                    tint = tileAccent,
+                                                    modifier = Modifier
+                                                        .size(18.dp)
+                                                        .clickable {
+                                                            onInstallHomeApp(app.title, app.url)
+                                                        },
+                                                )
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Close,
+                                                    contentDescription = "Remove ${app.title}",
+                                                    tint = MaterialTheme.colorScheme.error,
+                                                    modifier = Modifier.size(18.dp),
+                                                )
+                                            }
+                                        }
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(top = if (isEditingApps) 12.dp else 0.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(40.dp)
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(tileAccent.copy(alpha = 0.16f)),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Text(
+                                                    text = badgeLetters,
+                                                    style = MaterialTheme.typography.labelLarge,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = tileAccent,
+                                                )
+                                            }
+                                            Text(
+                                                text = app.title,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                textAlign = TextAlign.Center,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            repeat(4 - rowItems.size) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Curated Quick Access Links
         item {
             Column(
@@ -464,6 +677,88 @@ fun StartPageContent(
             }
         }
     }
+
+    if (showInstallAppDialog) {
+        InstallHomeAppDialog(
+            onDismiss = { showInstallAppDialog = false },
+            onConfirm = { title, url ->
+                showInstallAppDialog = false
+                onInstallHomeApp(title, url)
+            },
+        )
+    }
+}
+
+@Composable
+fun InstallHomeAppDialog(
+    initialTitle: String = "",
+    initialUrl: String = "",
+    onDismiss: () -> Unit,
+    onConfirm: (title: String, url: String) -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    var appTitle by remember(initialTitle) { mutableStateOf(initialTitle) }
+    var appUrl by remember(initialUrl) { mutableStateOf(initialUrl) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Install Any Link to Home") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Save any link to OnionShield's Home Apps menu and create a shortcut on your mobile Home Screen.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = appTitle,
+                    onValueChange = { appTitle = it },
+                    label = { Text("App Name (optional)") },
+                    placeholder = { Text("e.g. YouTube") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("install_app_title_input"),
+                )
+                OutlinedTextField(
+                    value = appUrl,
+                    onValueChange = { appUrl = it },
+                    label = { Text("Website or Link URL") },
+                    placeholder = { Text("https://...") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("install_app_url_input"),
+                )
+                TextButton(
+                    onClick = {
+                        val clip = clipboard.getText()?.text.orEmpty()
+                        val extracted = TrackerAndUrlEngine.extractFirstHttpUrl(clip) ?: clip.trim()
+                        if (extracted.isNotBlank()) {
+                            appUrl = extracted
+                        }
+                    },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                ) {
+                    Text("Paste Link from Clipboard")
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(appTitle, appUrl) },
+                enabled = appUrl.trim().isNotEmpty(),
+                modifier = Modifier.testTag("install_app_confirm_button"),
+            ) {
+                Text("Install & Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
 }
 
 @Composable

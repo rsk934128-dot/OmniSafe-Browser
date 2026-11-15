@@ -6,6 +6,9 @@
 
 **Hardened Dual-Mode Android Privacy Browser — Surface Web & Tor / `.onion` Routing**
 
+Part of the **[OmniSafe-Browser](https://github.com/rsk934128-dot/OmniSafe-Browser)** privacy browser ecosystem.
+
+[![Repository](https://img.shields.io/badge/GitHub-OmniSafe--Browser-00E5D1?style=for-the-badge&logo=github&logoColor=0B0F19)](https://github.com/rsk934128-dot/OmniSafe-Browser)
 [![Platform](https://img.shields.io/badge/Platform-Android%20(SDK%2024--36)-00E5D1?style=for-the-badge&logo=android&logoColor=0B0F19)](https://developer.android.com)
 [![UI](https://img.shields.io/badge/UI-Jetpack%20Compose%20M3-B66CFF?style=for-the-badge&logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
 [![Language](https://img.shields.io/badge/Kotlin-2.2-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://kotlinlang.org)
@@ -47,6 +50,7 @@
 ### Core Security Shields
 - **No-Script Mode (Default On):** Disables JavaScript execution (`javaScriptEnabled = false`) and intercepts `.js`/`.mjs` network requests out of the box to prevent script-based exploits.
 - **Tor SOCKS5 Proxy Routing:** Uses `androidx.webkit.ProxyController` (`WebViewFeature.PROXY_OVERRIDE`) to route traffic through `socks5://127.0.0.1:9050` (or custom SOCKS5/HTTP endpoints) with live TCP socket reachability diagnostics and Orbot detection.
+- **V3 `.onion` Bridge & Circuit Diagnostics:** Dedicated top-bar Shield diagnostic sheet featuring an animated `CircuitGraph` route visualizer, real SOCKS5 handshake & `check.torproject.org/api/ip` Exit IP verification, optional Tor ControlPort (`9051`) `GETINFO circuit-status` & `SIGNAL NEWNYM` new-circuit rotation, 56-character V3 `.onion` address verification, Orbot `START` intent control, and pluggable transport (`obfs4`, `Snowflake`, `meek-azure`, `Custom`) bridge validation.
 - **HTTPS Everywhere:** Automatically upgrades clearnet `http://` URLs to `https://` while preserving `.onion` hidden services and local loopback addresses, and enforces `MIXED_CONTENT_NEVER_ALLOW`.
 - **WebRTC Leak Protection:** Injects runtime guards neutralizing `RTCPeerConnection` and `navigator.mediaDevices` while denying camera, microphone, and geolocation prompts in `WebChromeClient`.
 - **Fingerprint Randomization:** Rotates User-Agent profiles and injects per-tab seeded Canvas, WebGL, `hardwareConcurrency`, and `deviceMemory` noise with one-tap seed rotation.
@@ -143,12 +147,24 @@ This repository includes automated GitHub Actions workflows in `.github/workflow
 
 ---
 
-## Vercel Hosting (Web & PWA Companion)
+## Vercel Hosting (Web & PWA Companion + QR APK Portal)
 
 This repository also includes `vercel.json` and an installable PWA inside `web/`:
-1. Import the GitHub repository in **Vercel** (no custom build command needed — `vercel.json` automatically serves `web/` with strict privacy headers).
-2. The deployed Vercel web app provides private search launching, real-time browser WebRTC/fingerprint auditing, a tracking-parameter URL stripper, and direct Android APK downloads from GitHub Releases.
-3. For native `.onion` SOCKS5 Tor routing (`127.0.0.1:9050`) and No-Script WebView browsing, install the Android APK built via GitHub Releases.
+1. Import [`rsk934128-dot/OmniSafe-Browser`](https://github.com/rsk934128-dot/OmniSafe-Browser) in **Vercel** (no custom build command needed — `vercel.json` automatically serves `web/` with strict privacy headers).
+2. The deployed Vercel web app provides private search launching, real-time browser WebRTC/fingerprint auditing, a tracking-parameter URL stripper, and automatic APK release fetching from `rsk934128-dot/OmniSafe-Browser` with a client-side scannable **QR code** for mobile installation.
+3. For native `.onion` SOCKS5 Tor routing (`127.0.0.1:9050`) and No-Script WebView browsing, scan the QR code or download the Android APK built via GitHub Releases.
+
+---
+
+## OmniSafe-Browser Ecosystem & Roadmap Alignment
+
+| Capability | Desktop (`OmniSafe-Browser` / Electron) | Android (`OnionShield` / Kotlin + WebKit) |
+| :--- | :--- | :--- |
+| **Dual-Stack Connectivity** | Direct Clearnet / Tor Circuit middleware | Surface Web / `ProxyController` SOCKS5 (`127.0.0.1:9050`) |
+| **Script-Shield** | Renderer JS isolation | `javaScriptEnabled = false` by default + `.js`/`.mjs` blocker |
+| **Anti-Fingerprinting** | Canvas & renderer noise | Seeded Canvas, WebGL, CPU & UA profile randomization |
+| **V3 `.onion` Support** | Embedded Tor binary | Orbot / local Tor daemon + TCP socket health check |
+| **Zero-Trace Storage** | Encrypted local vault (Roadmap) | Room local-only storage + one-tap **Shred Session** |
 
 ---
 

@@ -1,5 +1,6 @@
 package com.example.browser
 
+import android.content.Intent
 import android.net.Uri
 import android.webkit.WebResourceResponse
 import com.example.data.ABOUT_START_URL
@@ -127,5 +128,53 @@ object TrackerAndUrlEngine {
         if (!url.startsWith("http://", ignoreCase = true)) return url
         if (isOnionUrl(url) || isLocalhostOrLoopback(url)) return url
         return "https://" + url.substring(7)
+    }
+
+    fun normalizeHost(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        val host = runCatching { Uri.parse(url).host?.lowercase() }.getOrNull() ?: return null
+        return host.removePrefix("www.").takeIf { it.isNotBlank() }
+    }
+
+    fun extractIntentFallbackUrl(intentUri: String): String? {
+        if (!intentUri.startsWith("intent:", ignoreCase = true)) return null
+        val parsedFallback = runCatching {
+            val intent = Intent.parseUri(intentUri, Intent.URI_INTENT_SCHEME)
+            intent.getStringExtra("browser_fallback_url")
+        }.getOrNull()
+        val candidate = parsedFallback ?: run {
+            val marker = "S.browser_fallback_url="
+            val idx = intentUri.indexOf(marker)
+            if (idx >= 0) {
+                val rawVal = intentUri.substring(idx + marker.length).substringBefore(';')
+                runCatching { java.net.URLDecoder.decode(rawVal, "UTF-8") }.getOrNull()
+            } else {
+                null
+            }
+        }
+        return candidate?.takeIf {
+            it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true)
+        }
+    }
+
+    fun extractFirstHttpUrl(rawText: String?): String? {
+        if (rawText.isNullOrBlank()) return null
+        val regex = Regex("""https?://[^\s<>"']+""", RegexOption.IGNORE_CASE)
+        val match = regex.find(rawText.trim())?.value
+        if (!match.isNullOrBlank()) {
+            return match.trimEnd('.', ',', ';', ')', ']')
+        }
+        return null
+    }
+
+    fun isApkAsset(url: String?, fileName: String?, mimeType: String?): Boolean {
+        if (mimeType.equals("application/vnd.android.package-archive", ignoreCase = true)) {
+            return true
+        }
+        if (!fileName.isNullOrBlank() && fileName.trim().lowercase().endsWith(".apk")) {
+            return true
+        }
+        val path = runCatching { Uri.parse(url.orEmpty()).path?.lowercase() }.getOrNull().orEmpty()
+        return path.endsWith(".apk")
     }
 }

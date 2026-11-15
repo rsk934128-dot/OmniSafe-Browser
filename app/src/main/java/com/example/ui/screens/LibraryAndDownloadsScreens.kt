@@ -18,17 +18,28 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AddToHomeScreen
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.InstallMobile
 import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
@@ -40,18 +51,24 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.browser.TrackerAndUrlEngine
 import com.example.data.BookmarkEntity
 import com.example.data.DownloadEntity
 import com.example.data.HistoryEntity
+import com.example.data.PendingDownloadRequest
+import com.example.ui.components.DownloadSandboxDialog
 import com.example.ui.theme.LocalShieldColors
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -63,6 +80,7 @@ fun LibraryScreen(
     bookmarks: List<BookmarkEntity>,
     history: List<HistoryEntity>,
     onOpenUrl: (String) -> Unit,
+    onInstallToHomeScreen: (title: String, url: String) -> Unit = { _, _ -> },
     onDeleteBookmark: (Long) -> Unit,
     onDeleteHistory: (Long) -> Unit,
     onClearAllHistory: () -> Unit,
@@ -151,7 +169,7 @@ fun LibraryScreen(
                             Row(
                                 modifier = Modifier.padding(14.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 Icon(
                                     imageVector = if (item.isOnion) Icons.Rounded.Security else Icons.Rounded.Language,
@@ -171,6 +189,16 @@ fun LibraryScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onInstallToHomeScreen(item.title, item.url) },
+                                    modifier = Modifier.testTag("bookmark_install_home_${item.id}"),
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.AddToHomeScreen,
+                                        contentDescription = "Install ${item.title} to Home Screen",
+                                        tint = accent,
                                     )
                                 }
                                 IconButton(onClick = { onDeleteBookmark(item.id) }) {
@@ -222,7 +250,7 @@ fun LibraryScreen(
                             Row(
                                 modifier = Modifier.padding(14.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.Language,
@@ -242,6 +270,16 @@ fun LibraryScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onInstallToHomeScreen(item.title, item.url) },
+                                    modifier = Modifier.testTag("history_install_home_${item.id}"),
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.AddToHomeScreen,
+                                        contentDescription = "Install ${item.title} to Home Screen",
+                                        tint = shieldColors.surfaceAccent,
                                     )
                                 }
                                 IconButton(onClick = { onDeleteHistory(item.id) }) {
@@ -264,18 +302,27 @@ fun LibraryScreen(
 @Composable
 fun DownloadsScreen(
     downloads: List<DownloadEntity>,
+    pendingDownload: PendingDownloadRequest? = null,
+    onConfirmPendingDownload: () -> Unit = {},
+    onCancelPendingDownload: () -> Unit = {},
+    onRefreshDownloads: () -> Unit = {},
+    onOpenOrInstallDownload: (DownloadEntity) -> Unit = {},
+    onOpenSystemDownloads: () -> Unit = {},
+    onRequestDirectDownload: (String) -> Unit = {},
     onDeleteDownload: (Long) -> Unit,
     onClearDownloads: () -> Unit,
     onNavigateBack: () -> Unit,
 ) {
     val shieldColors = LocalShieldColors.current
+    val clipboard = LocalClipboardManager.current
     val dateFormatter = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
+    var showApkUrlDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text("Sandboxed Downloads") },
+                title = { Text("Downloads & APK Installer") },
                 navigationIcon = {
                     IconButton(
                         onClick = onNavigateBack,
@@ -285,6 +332,18 @@ fun DownloadsScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = onRefreshDownloads,
+                        modifier = Modifier.testTag("refresh_downloads_button"),
+                    ) {
+                        Icon(Icons.Rounded.Refresh, contentDescription = "Refresh download status")
+                    }
+                    IconButton(
+                        onClick = onOpenSystemDownloads,
+                        modifier = Modifier.testTag("open_system_downloads_button"),
+                    ) {
+                        Icon(Icons.Rounded.FolderOpen, contentDescription = "Open device Downloads folder")
+                    }
                     if (downloads.isNotEmpty()) {
                         IconButton(onClick = onClearDownloads) {
                             Icon(Icons.Rounded.DeleteSweep, contentDescription = "Clear download log")
@@ -296,12 +355,20 @@ fun DownloadsScreen(
                 ),
             )
         },
+        floatingActionButton = {
+            ExtendedFloatingActionButton(
+                onClick = { showApkUrlDialog = true },
+                icon = { Icon(Icons.Rounded.Add, contentDescription = "Download APK or file link") },
+                text = { Text("Download APK / Link") },
+                modifier = Modifier.testTag("download_apk_url_fab"),
+            )
+        },
     ) { innerPadding ->
         if (downloads.isEmpty()) {
             EmptyLibraryState(
-                icon = Icons.Rounded.Download,
+                icon = Icons.Rounded.InstallMobile,
                 title = "No Downloads Recorded",
-                subtitle = "Every download is intercepted by OnionShield's sandbox confirmation dialog before touching storage.",
+                subtitle = "Download any .apk package or file from the browser, or tap Download APK / Link below to download & open it via Android's installer.",
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding),
@@ -312,11 +379,12 @@ fun DownloadsScreen(
                     .fillMaxSize()
                     .padding(innerPadding)
                     .navigationBarsPadding(),
-                contentPadding = PaddingValues(16.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 88.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 items(downloads, key = { it.id }) { dl ->
+                    val isApk = TrackerAndUrlEngine.isApkAsset(dl.url, dl.fileName, dl.mimeType)
                     val statusColor = when (dl.status) {
                         "DOWNLOADING", "COMPLETED" -> shieldColors.secureGreen
                         "CANCELLED" -> shieldColors.warningAmber
@@ -330,67 +398,170 @@ fun DownloadsScreen(
                         color = MaterialTheme.colorScheme.surface,
                         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
                     ) {
-                        Row(
+                        Column(
                             modifier = Modifier.padding(14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Download,
-                                contentDescription = null,
-                                tint = statusColor,
-                            )
-                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text(
-                                    text = dl.fileName,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (isApk) Icons.Rounded.InstallMobile else Icons.Rounded.Download,
+                                    contentDescription = null,
+                                    tint = statusColor,
                                 )
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Surface(
-                                        shape = RoundedCornerShape(4.dp),
-                                        color = statusColor.copy(alpha = 0.16f),
-                                    ) {
-                                        Text(
-                                            text = dl.status,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = statusColor,
-                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
-                                        )
-                                    }
-                                    if (dl.isOnionSource) {
+                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text(
+                                        text = dl.fileName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                         Surface(
                                             shape = RoundedCornerShape(4.dp),
-                                            color = shieldColors.torAccent.copy(alpha = 0.18f),
+                                            color = statusColor.copy(alpha = 0.16f),
                                         ) {
                                             Text(
-                                                text = "TOR ORIGIN",
+                                                text = dl.status,
                                                 style = MaterialTheme.typography.labelSmall,
-                                                color = shieldColors.torAccent,
+                                                color = statusColor,
                                                 modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
                                             )
                                         }
+                                        if (isApk) {
+                                            Surface(
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = shieldColors.surfaceAccent.copy(alpha = 0.18f),
+                                            ) {
+                                                Text(
+                                                    text = "APK",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = shieldColors.surfaceAccent,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                                )
+                                            }
+                                        }
+                                        if (dl.isOnionSource) {
+                                            Surface(
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = shieldColors.torAccent.copy(alpha = 0.18f),
+                                            ) {
+                                                Text(
+                                                    text = "TOR ORIGIN",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = shieldColors.torAccent,
+                                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = dateFormatter.format(Date(dl.createdAt)),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
                                     }
-                                    Text(
-                                        text = dateFormatter.format(Date(dl.createdAt)),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                }
+                                IconButton(onClick = { onDeleteDownload(dl.id) }) {
+                                    Icon(
+                                        Icons.Rounded.Delete,
+                                        contentDescription = "Delete download entry",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
                             }
-                            IconButton(onClick = { onDeleteDownload(dl.id) }) {
-                                Icon(
-                                    Icons.Rounded.Delete,
-                                    contentDescription = "Delete download entry",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+
+                            if (dl.systemDownloadId >= 0L && dl.status != "CANCELLED" && dl.status != "FAILED") {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                ) {
+                                    FilledTonalButton(
+                                        onClick = { onOpenOrInstallDownload(dl) },
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                        modifier = Modifier.testTag("install_or_open_download_${dl.id}"),
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isApk) Icons.Rounded.InstallMobile else Icons.AutoMirrored.Rounded.OpenInNew,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Text(
+                                            text = if (isApk) "  Install APK" else "  Open File",
+                                            style = MaterialTheme.typography.labelLarge,
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    if (showApkUrlDialog) {
+        var urlInput by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showApkUrlDialog = false },
+            title = { Text("Download APK or File Link") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Enter a direct .apk or file download link. OnionShield will verify it in the Sandbox Guard before saving to Downloads.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = urlInput,
+                        onValueChange = { urlInput = it },
+                        label = { Text("APK / File URL") },
+                        placeholder = { Text("https://.../app-release.apk") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("direct_apk_url_input"),
+                    )
+                    TextButton(
+                        onClick = {
+                            val clip = clipboard.getText()?.text.orEmpty()
+                            val extracted = TrackerAndUrlEngine.extractFirstHttpUrl(clip) ?: clip.trim()
+                            if (extracted.isNotBlank()) urlInput = extracted
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Text("Paste Link from Clipboard")
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showApkUrlDialog = false
+                        onRequestDirectDownload(urlInput)
+                    },
+                    enabled = urlInput.trim().isNotEmpty(),
+                    modifier = Modifier.testTag("direct_apk_download_confirm"),
+                ) {
+                    Text("Check & Download")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showApkUrlDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    pendingDownload?.let { req ->
+        DownloadSandboxDialog(
+            request = req,
+            onConfirm = onConfirmPendingDownload,
+            onCancel = onCancelPendingDownload,
+        )
     }
 }
 

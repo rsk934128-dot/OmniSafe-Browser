@@ -2,8 +2,14 @@ package com.example.browser
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
+import android.content.MutableContextWrapper
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.os.Message
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
@@ -23,6 +29,7 @@ import androidx.webkit.WebViewFeature
 import com.example.data.BrowserMode
 import com.example.data.PendingDownloadRequest
 import com.example.data.SecurityConfig
+import java.util.concurrent.ConcurrentHashMap
 
 interface WebViewEventCallbacks {
     fun onPageStarted(tabId: String, url: String)
@@ -34,56 +41,105 @@ interface WebViewEventCallbacks {
     fun onPageError(tabId: String, url: String, errorDescription: String)
     fun onDownloadIntercepted(tabId: String, request: PendingDownloadRequest)
     fun onRendererTerminated(tabId: String)
+    fun onOpenNewTab(url: String)
+    fun onShowCustomView(view: View?, callback: WebChromeClient.CustomViewCallback?)
+    fun onHideCustomView()
+    fun onLinkLongPressed(tabId: String, url: String, title: String?)
 }
 
 class WebViewPool(
-    private val context: Context,
+    context: Context,
     private val callbacks: WebViewEventCallbacks,
 ) {
+    private val appContext = context.applicationContext
     private val pool = mutableMapOf<String, WebView>()
+    private val contextWrappers = mutableMapOf<String, MutableContextWrapper>()
+    private val tabCurrentUrls = ConcurrentHashMap<String, String>()
+    private val softwareLayerTabs = mutableSetOf<String>()
     private var currentConfig: SecurityConfig = SecurityConfig()
 
     fun updateSecurityConfig(config: SecurityConfig) {
         currentConfig = config
-        pool.values.forEach { webView ->
+        pool.forEach { (tabId, webView) ->
             val seed = (webView.tag as? String) ?: "DEFAULT"
-            applySettingsToWebView(webView, config, seed)
+            applySettingsToWebView(tabId, webView, config, seed)
         }
     }
 
-    fun getOrCreateWebView(tabId: String, seed: String, config: SecurityConfig): WebView {
+    fun getOrCreateWebView(
+        tabId: String,
+        seed: String,
+        config: SecurityConfig,
+        hostContext: Context? = null,
+    ): WebView {
         currentConfig = config
-        return pool.getOrPut(tabId) {
-            createHardenedWebView(tabId, seed, config)
-        }.also { webView ->
-            applySettingsToWebView(webView, config, seed)
+        if (hostContext != null) {
+            contextWrappers[tabId]?.baseContext = hostContext
         }
+        return pool.getOrPut(tabId) {
+            val wrapper = MutableContextWrapper(hostContext ?: appContext)
+            contextWrappers[tabId] = wrapper
+            createHardenedWebView(tabId, seed, config, wrapper)
+        }.also { webView ->
+            if (softwareLayerTabs.contains(tabId) && webView.layerType != View.LAYER_TYPE_SOFTWARE) {
+                webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+            }
+            applySettingsToWebView(tabId, webView, config, seed)
+        }
+    }
+
+    fun loadUrlForTab(tabId: String, seed: String, config: SecurityConfig, url: String) {
+        tabCurrentUrls[tabId] = url
+        val webView = getOrCreateWebView(tabId, seed, config)
+        webView.loadUrl(url)
     }
 
     fun getWebView(tabId: String): WebView? = pool[tabId]
 
     fun destroyTabWebView(tabId: String) {
+        tabCurrentUrls.remove(tabId)
+        softwareLayerTabs.remove(tabId)
+        contextWrappers.remove(tabId)?.baseContext = appContext
         pool.remove(tabId)?.let { wv ->
-            (wv.parent as? ViewGroup)?.removeView(wv)
-            wv.stopLoading()
-            wv.clearHistory()
-            wv.destroy()
+            runCatching {
+                (wv.parent as? ViewGroup)?.removeView(wv)
+                wv.stopLoading()
+                wv.clearHistory()
+                wv.destroy()
+            }
         }
     }
 
     fun shredAllSessions() {
-        CookieManager.getInstance().removeAllCookies(null)
-        CookieManager.getInstance().flush()
-        WebStorage.getInstance().deleteAllData()
+        runCatching {
+            CookieManager.getInstance().removeAllCookies(null)
+            CookieManager.getInstance().flush()
+            WebStorage.getInstance().deleteAllData()
+        }
         pool.values.forEach { wv ->
-            (wv.parent as? ViewGroup)?.removeView(wv)
-            wv.stopLoading()
-            wv.clearCache(true)
-            wv.clearFormData()
-            wv.clearHistory()
-            wv.destroy()
+            runCatching {
+                (wv.parent as? ViewGroup)?.removeView(wv)
+                wv.stopLoading()
+                wv.clearCache(true)
+                wv.clearFormData()
+                wv.clearHistory()
+                wv.destroy()
+            }
         }
         pool.clear()
+        contextWrappers.values.forEach { it.baseContext = appContext }
+        contextWrappers.clear()
+        tabCurrentUrls.clear()
+        softwareLayerTabs.clear()
+    }
+
+    private fun isJsDisabledForTab(tabId: String, config: SecurityConfig, urlOverride: String? = null): Boolean {
+        if (!config.noScriptEnabled) return false
+        val host = TrackerAndUrlEngine.normalizeHost(urlOverride ?: tabCurrentUrls[tabId])
+        if (host != null && config.trustedJsHosts.contains(host)) {
+            return false
+        }
+        return true
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -91,16 +147,20 @@ class WebViewPool(
         tabId: String,
         seed: String,
         config: SecurityConfig,
+        wrapperContext: MutableContextWrapper,
     ): WebView {
-        val webView = WebView(context).apply {
+        val webView = WebView(wrapperContext).apply {
             tag = seed
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
+            if (softwareLayerTabs.contains(tabId)) {
+                setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+            }
         }
 
-        applySettingsToWebView(webView, config, seed)
+        applySettingsToWebView(tabId, webView, config, seed)
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -113,9 +173,89 @@ class WebViewPool(
                 }
             }
 
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message?,
+            ): Boolean {
+                val hitResult = view?.hitTestResult
+                val hitUrl = hitResult?.extra
+                if (!hitUrl.isNullOrBlank() &&
+                    (hitUrl.startsWith("http://", ignoreCase = true) ||
+                        hitUrl.startsWith("https://", ignoreCase = true))
+                ) {
+                    callbacks.onOpenNewTab(hitUrl)
+                    return false
+                }
+
+                val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                val tempWebView = WebView(wrapperContext).apply {
+                    var handled = false
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            childView: WebView?,
+                            request: WebResourceRequest?,
+                        ): Boolean {
+                            val popupUrl = request?.url?.toString()
+                            if (!handled && !popupUrl.isNullOrBlank() &&
+                                (popupUrl.startsWith("http://", ignoreCase = true) ||
+                                    popupUrl.startsWith("https://", ignoreCase = true))
+                            ) {
+                                handled = true
+                                callbacks.onOpenNewTab(popupUrl)
+                            }
+                            runCatching { childView?.destroy() }
+                            return true
+                        }
+
+                        override fun onPageStarted(
+                            childView: WebView?,
+                            url: String?,
+                            favicon: Bitmap?,
+                        ) {
+                            if (!handled && !url.isNullOrBlank() &&
+                                (url.startsWith("http://", ignoreCase = true) ||
+                                    url.startsWith("https://", ignoreCase = true))
+                            ) {
+                                handled = true
+                                callbacks.onOpenNewTab(url)
+                            }
+                            runCatching {
+                                childView?.stopLoading()
+                                childView?.destroy()
+                            }
+                        }
+                    }
+                    postDelayed({
+                        if (!handled) {
+                            runCatching { destroy() }
+                        }
+                    }, 4000L)
+                }
+                transport.webView = tempWebView
+                resultMsg.sendToTarget()
+                return true
+            }
+
+            override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                callbacks.onShowCustomView(view, callback)
+            }
+
+            override fun onHideCustomView() {
+                callbacks.onHideCustomView()
+            }
+
             override fun onPermissionRequest(request: PermissionRequest?) {
-                if (currentConfig.webRtcLeakProtectionEnabled) {
-                    request?.deny()
+                if (request == null) return
+                val resources = request.resources ?: emptyArray()
+                val protectedMediaOnly = resources.isNotEmpty() &&
+                    resources.all { it == PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID } &&
+                    currentConfig.browserMode == BrowserMode.SURFACE
+                if (protectedMediaOnly) {
+                    request.grant(resources)
+                } else if (currentConfig.webRtcLeakProtectionEnabled) {
+                    request.deny()
                 } else {
                     super.onPermissionRequest(request)
                 }
@@ -125,7 +265,6 @@ class WebViewPool(
                 origin: String?,
                 callback: GeolocationPermissions.Callback?,
             ) {
-                // Always deny geolocation for privacy
                 callback?.invoke(origin, false, false)
             }
         }
@@ -138,18 +277,60 @@ class WebViewPool(
                 val targetUrl = request?.url?.toString() ?: return false
                 val lower = targetUrl.lowercase()
 
-                if (lower.startsWith("intent:") || lower.startsWith("market:") || lower.startsWith("tel:")) {
-                    return true // Prevent silent external app leaks from web pages
+                if (lower.startsWith("intent:")) {
+                    val fallbackUrl = TrackerAndUrlEngine.extractIntentFallbackUrl(targetUrl)
+                    if (fallbackUrl != null) {
+                        val upgraded = TrackerAndUrlEngine.applyHttpsUpgradeIfNeeded(
+                            fallbackUrl,
+                            currentConfig.httpsEverywhereEnabled,
+                        )
+                        tabCurrentUrls[tabId] = upgraded
+                        if (view != null) {
+                            syncHostJsSetting(tabId, view, currentConfig, upgraded)
+                            view.loadUrl(upgraded)
+                        }
+                    }
+                    return true
                 }
 
-                if (currentConfig.httpsEverywhereEnabled && lower.startsWith("http://") &&
+                if (lower.startsWith("mailto:") || lower.startsWith("tel:")) {
+                    if (currentConfig.browserMode == BrowserMode.SURFACE) {
+                        runCatching {
+                            val extIntent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            appContext.startActivity(extIntent)
+                        }
+                    }
+                    return true
+                }
+
+                if (lower.startsWith("market:") || lower.startsWith("javascript:") || lower.startsWith("file:")) {
+                    return true
+                }
+
+                if (lower.startsWith("http://") &&
+                    currentConfig.httpsEverywhereEnabled &&
                     !TrackerAndUrlEngine.isOnionUrl(targetUrl) &&
                     !TrackerAndUrlEngine.isLocalhostOrLoopback(targetUrl)
                 ) {
                     val upgraded = TrackerAndUrlEngine.applyHttpsUpgradeIfNeeded(targetUrl, true)
-                    view?.loadUrl(upgraded)
+                    tabCurrentUrls[tabId] = upgraded
+                    if (view != null) {
+                        syncHostJsSetting(tabId, view, currentConfig, upgraded)
+                        view.loadUrl(upgraded)
+                    }
                     return true
                 }
+
+                if (lower.startsWith("http://") || lower.startsWith("https://")) {
+                    tabCurrentUrls[tabId] = targetUrl
+                    if (view != null) {
+                        syncHostJsSetting(tabId, view, currentConfig, targetUrl)
+                    }
+                    return false
+                }
+
                 return false
             }
 
@@ -158,13 +339,16 @@ class WebViewPool(
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
                 val reqUrl = request?.url?.toString() ?: return null
+                if (request.isForMainFrame) {
+                    tabCurrentUrls[tabId] = reqUrl
+                }
 
                 if (currentConfig.trackerBlockerEnabled && TrackerAndUrlEngine.isTrackerRequest(reqUrl)) {
                     callbacks.onTrackerBlocked(tabId)
                     return TrackerAndUrlEngine.emptyBlockedResponse()
                 }
 
-                if (currentConfig.noScriptEnabled) {
+                if (isJsDisabledForTab(tabId, currentConfig)) {
                     val path = request.url?.path?.lowercase().orEmpty()
                     if (path.endsWith(".js") || path.endsWith(".mjs")) {
                         callbacks.onScriptBlocked(tabId)
@@ -177,12 +361,19 @@ class WebViewPool(
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 val safeUrl = url.orEmpty()
+                if (safeUrl.isNotBlank()) {
+                    tabCurrentUrls[tabId] = safeUrl
+                    if (view != null) {
+                        syncHostJsSetting(tabId, view, currentConfig, safeUrl)
+                    }
+                }
                 callbacks.onPageStarted(tabId, safeUrl)
-                if (!currentConfig.noScriptEnabled) {
+                if (!isJsDisabledForTab(tabId, currentConfig, safeUrl)) {
                     val script = PrivacyScripts.buildHardeningScript(
                         seed = (view?.tag as? String) ?: seed,
                         enableWebRtcGuard = currentConfig.webRtcLeakProtectionEnabled,
                         enableFingerprintRandomization = currentConfig.fingerprintRandomizationEnabled,
+                        mode = currentConfig.browserMode,
                     )
                     if (script.isNotEmpty()) {
                         view?.evaluateJavascript(script, null)
@@ -192,11 +383,15 @@ class WebViewPool(
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 val safeUrl = url.orEmpty()
-                if (!currentConfig.noScriptEnabled) {
+                if (safeUrl.isNotBlank()) {
+                    tabCurrentUrls[tabId] = safeUrl
+                }
+                if (!isJsDisabledForTab(tabId, currentConfig, safeUrl)) {
                     val script = PrivacyScripts.buildHardeningScript(
                         seed = (view?.tag as? String) ?: seed,
                         enableWebRtcGuard = currentConfig.webRtcLeakProtectionEnabled,
                         enableFingerprintRandomization = currentConfig.fingerprintRandomizationEnabled,
+                        mode = currentConfig.browserMode,
                     )
                     if (script.isNotEmpty()) {
                         view?.evaluateJavascript(script, null)
@@ -227,10 +422,17 @@ class WebViewPool(
                 view: WebView?,
                 detail: RenderProcessGoneDetail?,
             ): Boolean {
+                if (detail?.didCrash() == false) {
+                    // System/GPU renderer eviction (e.g. missing rendernode): fall back to software layer on retry
+                    softwareLayerTabs.add(tabId)
+                }
                 pool.remove(tabId)
+                tabCurrentUrls.remove(tabId)
                 if (view != null) {
-                    (view.parent as? ViewGroup)?.removeView(view)
-                    view.destroy()
+                    runCatching {
+                        (view.parent as? ViewGroup)?.removeView(view)
+                        view.destroy()
+                    }
                 }
                 callbacks.onRendererTerminated(tabId)
                 return true
@@ -254,27 +456,75 @@ class WebViewPool(
             )
         }
 
+        webView.setOnLongClickListener { view ->
+            val wv = view as? WebView ?: return@setOnLongClickListener false
+            val hit = wv.hitTestResult
+            if (hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE ||
+                hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+            ) {
+                val fallbackUrl = hit.extra
+                val handler = Handler(Looper.getMainLooper()) { msg ->
+                    val hrefUrl = msg.data.getString("url").orEmpty().ifBlank { fallbackUrl.orEmpty() }
+                    val hrefTitle = msg.data.getString("title")
+                    if (hrefUrl.startsWith("http://", ignoreCase = true) ||
+                        hrefUrl.startsWith("https://", ignoreCase = true)
+                    ) {
+                        callbacks.onLinkLongPressed(tabId, hrefUrl, hrefTitle)
+                    }
+                    true
+                }
+                wv.requestFocusNodeHref(handler.obtainMessage())
+                true
+            } else {
+                false
+            }
+        }
+
         return webView
     }
 
     @SuppressLint("SetJavaScriptEnabled")
+    private fun syncHostJsSetting(
+        tabId: String,
+        webView: WebView,
+        config: SecurityConfig,
+        urlOverride: String? = null,
+    ) {
+        val jsEnabled = !isJsDisabledForTab(tabId, config, urlOverride)
+        val settings = webView.settings
+        if (settings.javaScriptEnabled != jsEnabled) {
+            settings.javaScriptEnabled = jsEnabled
+        }
+        if (settings.javaScriptCanOpenWindowsAutomatically != jsEnabled) {
+            settings.javaScriptCanOpenWindowsAutomatically = jsEnabled
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    @Suppress("DEPRECATION")
     private fun applySettingsToWebView(
+        tabId: String,
         webView: WebView,
         config: SecurityConfig,
         seed: String,
+        urlOverride: String? = null,
     ) {
+        val jsDisabled = isJsDisabledForTab(tabId, config, urlOverride)
         val settings = webView.settings
-        settings.javaScriptEnabled = !config.noScriptEnabled
+        if (settings.javaScriptEnabled != !jsDisabled) {
+            settings.javaScriptEnabled = !jsDisabled
+        }
         settings.domStorageEnabled = config.browserMode == BrowserMode.SURFACE
         settings.databaseEnabled = false
         settings.allowFileAccess = false
         settings.allowContentAccess = false
-        @Suppress("DEPRECATION")
         settings.allowFileAccessFromFileURLs = false
-        @Suppress("DEPRECATION")
         settings.allowUniversalAccessFromFileURLs = false
         settings.setGeolocationEnabled(false)
         settings.saveFormData = false
+        settings.mediaPlaybackRequiresUserGesture = false
+        settings.setSupportMultipleWindows(true)
+        settings.javaScriptCanOpenWindowsAutomatically = !jsDisabled
         settings.builtInZoomControls = true
         settings.displayZoomControls = false
         settings.useWideViewPort = true
@@ -285,22 +535,31 @@ class WebViewPool(
             WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         }
 
-        if (config.fingerprintRandomizationEnabled) {
-            settings.userAgentString = PrivacyScripts.profileForSeed(seed).userAgent
+        val targetUa = if (config.fingerprintRandomizationEnabled) {
+            PrivacyScripts.profileForSeed(seed, config.browserMode).userAgent
         } else {
-            settings.userAgentString = null
+            null
+        }
+        if (settings.userAgentString != targetUa) {
+            settings.userAgentString = targetUa
         }
 
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
-            WebSettingsCompat.setSafeBrowsingEnabled(settings, true)
+        runCatching {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
+                WebSettingsCompat.setSafeBrowsingEnabled(settings, true)
+            }
         }
 
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-            WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, config.forceDarkWebTheme)
+        runCatching {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, config.forceDarkWebTheme)
+            }
         }
 
-        val cookieManager = CookieManager.getInstance()
-        cookieManager.setAcceptCookie(config.browserMode == BrowserMode.SURFACE)
-        cookieManager.setAcceptThirdPartyCookies(webView, !config.blockThirdPartyCookies)
+        runCatching {
+            val cookieManager = CookieManager.getInstance()
+            cookieManager.setAcceptCookie(config.browserMode == BrowserMode.SURFACE)
+            cookieManager.setAcceptThirdPartyCookies(webView, !config.blockThirdPartyCookies)
+        }
     }
 }

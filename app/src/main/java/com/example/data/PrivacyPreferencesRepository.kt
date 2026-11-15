@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -20,6 +21,7 @@ class PrivacyPreferencesRepository(private val context: Context) {
     private object Keys {
         val BROWSER_MODE = stringPreferencesKey("browser_mode")
         val NO_SCRIPT = booleanPreferencesKey("no_script_enabled")
+        val TRUSTED_JS_HOSTS = stringSetPreferencesKey("trusted_js_hosts")
         val FINGERPRINT_RANDOMIZATION = booleanPreferencesKey("fingerprint_randomization")
         val HTTPS_EVERYWHERE = booleanPreferencesKey("https_everywhere")
         val WEBRTC_LEAK_PROTECTION = booleanPreferencesKey("webrtc_leak_protection")
@@ -29,6 +31,14 @@ class PrivacyPreferencesRepository(private val context: Context) {
         val TOR_PROXY_HOST = stringPreferencesKey("tor_proxy_host")
         val TOR_PROXY_PORT = intPreferencesKey("tor_proxy_port")
         val TOR_PROXY_PROTOCOL = stringPreferencesKey("tor_proxy_protocol")
+        val BRIDGE_TRANSPORT = stringPreferencesKey("bridge_transport")
+        val CUSTOM_BRIDGE_LINES = stringPreferencesKey("custom_bridge_lines")
+        val TOR_CONTROL_PORT = intPreferencesKey("tor_control_port")
+        val TOR_CONTROL_PASSWORD = stringPreferencesKey("tor_control_password")
+        val CIRCUIT_PRIVACY_LEVEL = stringPreferencesKey("circuit_privacy_level")
+        val VAULT_PIN_SALT = stringPreferencesKey("vault_pin_salt")
+        val VAULT_PIN_HASH = stringPreferencesKey("vault_pin_hash")
+        val VAULT_WRAPPED_DEK = stringPreferencesKey("vault_wrapped_dek")
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val DISCLAIMER_ACCEPTED = booleanPreferencesKey("disclaimer_accepted")
         val FORCE_DARK_THEME = booleanPreferencesKey("force_dark_theme")
@@ -39,7 +49,8 @@ class PrivacyPreferencesRepository(private val context: Context) {
             browserMode = prefs[Keys.BROWSER_MODE]?.let {
                 runCatching { BrowserMode.valueOf(it) }.getOrNull()
             } ?: BrowserMode.SURFACE,
-            noScriptEnabled = prefs[Keys.NO_SCRIPT] ?: true,
+            noScriptEnabled = prefs[Keys.NO_SCRIPT] ?: false,
+            trustedJsHosts = prefs[Keys.TRUSTED_JS_HOSTS] ?: emptySet(),
             fingerprintRandomizationEnabled = prefs[Keys.FINGERPRINT_RANDOMIZATION] ?: true,
             httpsEverywhereEnabled = prefs[Keys.HTTPS_EVERYWHERE] ?: true,
             webRtcLeakProtectionEnabled = prefs[Keys.WEBRTC_LEAK_PROTECTION] ?: true,
@@ -51,6 +62,15 @@ class PrivacyPreferencesRepository(private val context: Context) {
             torProxyProtocol = prefs[Keys.TOR_PROXY_PROTOCOL]?.let {
                 runCatching { ProxyProtocol.valueOf(it) }.getOrNull()
             } ?: ProxyProtocol.SOCKS5,
+            bridgeTransport = prefs[Keys.BRIDGE_TRANSPORT]?.let {
+                runCatching { BridgeTransport.valueOf(it) }.getOrNull()
+            } ?: BridgeTransport.DIRECT,
+            customBridgeLines = prefs[Keys.CUSTOM_BRIDGE_LINES] ?: "",
+            torControlPort = prefs[Keys.TOR_CONTROL_PORT] ?: 9051,
+            torControlPassword = prefs[Keys.TOR_CONTROL_PASSWORD] ?: "",
+            circuitPrivacyLevel = prefs[Keys.CIRCUIT_PRIVACY_LEVEL]?.let {
+                runCatching { CircuitPrivacyLevel.valueOf(it) }.getOrNull()
+            } ?: CircuitPrivacyLevel.STANDARD,
             searchEngine = prefs[Keys.SEARCH_ENGINE]?.let {
                 runCatching { SearchEngine.valueOf(it) }.getOrNull()
             } ?: SearchEngine.DUCKDUCKGO,
@@ -59,12 +79,35 @@ class PrivacyPreferencesRepository(private val context: Context) {
         )
     }
 
+    val vaultPinConfigured: Flow<Boolean> = context.privacyDataStore.data.map { prefs ->
+        !prefs[Keys.VAULT_PIN_HASH].isNullOrBlank() && !prefs[Keys.VAULT_PIN_SALT].isNullOrBlank()
+    }
+
+    val vaultPinCredentials: Flow<Pair<String, String>?> = context.privacyDataStore.data.map { prefs ->
+        val salt = prefs[Keys.VAULT_PIN_SALT]
+        val hash = prefs[Keys.VAULT_PIN_HASH]
+        if (!salt.isNullOrBlank() && !hash.isNullOrBlank()) salt to hash else null
+    }
+
+    val vaultWrappedDek: Flow<String?> = context.privacyDataStore.data.map { prefs ->
+        prefs[Keys.VAULT_WRAPPED_DEK]?.takeIf { it.isNotBlank() }
+    }
+
     suspend fun setBrowserMode(mode: BrowserMode) {
         context.privacyDataStore.edit { it[Keys.BROWSER_MODE] = mode.name }
     }
 
     suspend fun setNoScript(enabled: Boolean) {
         context.privacyDataStore.edit { it[Keys.NO_SCRIPT] = enabled }
+    }
+
+    suspend fun addTrustedJsHost(host: String) {
+        val clean = host.trim().lowercase()
+        if (clean.isBlank()) return
+        context.privacyDataStore.edit { prefs ->
+            val current = prefs[Keys.TRUSTED_JS_HOSTS] ?: emptySet()
+            prefs[Keys.TRUSTED_JS_HOSTS] = current + clean
+        }
     }
 
     suspend fun setFingerprintRandomization(enabled: Boolean) {
@@ -96,6 +139,58 @@ class PrivacyPreferencesRepository(private val context: Context) {
             it[Keys.TOR_PROXY_HOST] = host.trim().ifBlank { "127.0.0.1" }
             it[Keys.TOR_PROXY_PORT] = port.coerceIn(1, 65535)
             it[Keys.TOR_PROXY_PROTOCOL] = protocol.name
+        }
+    }
+
+    suspend fun setBridgeTransport(transport: BridgeTransport) {
+        context.privacyDataStore.edit { it[Keys.BRIDGE_TRANSPORT] = transport.name }
+    }
+
+    suspend fun updateBridgeConfig(
+        transport: BridgeTransport,
+        customLines: String,
+        controlPort: Int,
+        controlPassword: String,
+    ) {
+        context.privacyDataStore.edit {
+            it[Keys.BRIDGE_TRANSPORT] = transport.name
+            it[Keys.CUSTOM_BRIDGE_LINES] = customLines.trim()
+            it[Keys.TOR_CONTROL_PORT] = controlPort.coerceIn(1, 65535)
+            it[Keys.TOR_CONTROL_PASSWORD] = controlPassword
+        }
+    }
+
+    suspend fun setCircuitPrivacyLevel(level: CircuitPrivacyLevel) {
+        context.privacyDataStore.edit {
+            it[Keys.CIRCUIT_PRIVACY_LEVEL] = level.name
+            if (level == CircuitPrivacyLevel.STRICT) {
+                it[Keys.NO_SCRIPT] = true
+                it[Keys.WEBRTC_LEAK_PROTECTION] = true
+                it[Keys.HTTPS_EVERYWHERE] = true
+                it[Keys.FINGERPRINT_RANDOMIZATION] = true
+                it[Keys.TRACKER_BLOCKER] = true
+                it[Keys.BLOCK_THIRD_PARTY_COOKIES] = true
+                it[Keys.SAVE_SURFACE_HISTORY] = false
+            }
+        }
+    }
+
+    suspend fun saveVaultPinCredentials(saltBase64: String, hashBase64: String) {
+        context.privacyDataStore.edit {
+            it[Keys.VAULT_PIN_SALT] = saltBase64
+            it[Keys.VAULT_PIN_HASH] = hashBase64
+        }
+    }
+
+    suspend fun saveVaultWrappedDek(envelope: String) {
+        context.privacyDataStore.edit {
+            it[Keys.VAULT_WRAPPED_DEK] = envelope
+        }
+    }
+
+    suspend fun clearVaultWrappedDek() {
+        context.privacyDataStore.edit {
+            it.remove(Keys.VAULT_WRAPPED_DEK)
         }
     }
 

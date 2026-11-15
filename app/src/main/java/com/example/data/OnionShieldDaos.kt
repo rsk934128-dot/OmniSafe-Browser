@@ -56,3 +56,39 @@ interface DownloadDao {
     @Query("DELETE FROM downloads")
     suspend fun clearAll()
 }
+
+@Dao
+interface VaultDao {
+    @Query("SELECT * FROM vault_entries ORDER BY updatedAt DESC")
+    fun observeAll(): Flow<List<VaultEntryEntity>>
+
+    @Query("SELECT COUNT(*) FROM vault_entries")
+    fun observeCount(): Flow<Int>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(entry: VaultEntryEntity): Long
+
+    @Query("DELETE FROM vault_entries WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM vault_entries")
+    suspend fun clearAll()
+}
+
+@Dao
+interface PinnedAppDao {
+    @Query("SELECT * FROM pinned_apps ORDER BY createdAt ASC")
+    fun observeAll(): Flow<List<PinnedAppEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(app: PinnedAppEntity): Long
+
+    @Query("DELETE FROM pinned_apps WHERE url = :url")
+    suspend fun deleteByUrl(url: String)
+
+    @Query("DELETE FROM pinned_apps WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
+    @Query("SELECT COUNT(*) FROM pinned_apps")
+    suspend fun count(): Int
+}

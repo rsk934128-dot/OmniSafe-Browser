@@ -19,17 +19,23 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AddToHomeScreen
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CodeOff
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.Gavel
 import androidx.compose.material.icons.rounded.Https
+import androidx.compose.material.icons.rounded.Hub
+import androidx.compose.material.icons.rounded.InstallMobile
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
@@ -59,8 +65,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.browser.HomeAppShortcutHelper
+import com.example.browser.TrackerAndUrlEngine
 import com.example.data.BrowserMode
 import com.example.data.BrowserTab
+import com.example.data.LinkMenuTarget
 import com.example.data.PendingDownloadRequest
 import com.example.data.SecurityConfig
 import com.example.ui.theme.LocalShieldColors
@@ -230,6 +239,7 @@ fun QuickShieldSheet(
     onToggleTrackerBlocker: (Boolean) -> Unit,
     onToggleThirdPartyCookies: (Boolean) -> Unit,
     onRotateSeed: () -> Unit,
+    onOpenCircuitDiagnostics: () -> Unit = {},
     onOpenFullSettings: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -346,6 +356,18 @@ fun QuickShieldSheet(
                 Spacer(Modifier.width(8.dp))
                 Text("Rotate Fingerprint Seed (${tab.userAgentLabel})")
             }
+
+            Button(
+                onClick = onOpenCircuitDiagnostics,
+                colors = ButtonDefaults.buttonColors(containerColor = shieldColors.torAccent),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("sheet_circuit_diagnostics_button"),
+            ) {
+                Icon(Icons.Rounded.Hub, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Tor Circuit & Bridge Diagnostics")
+            }
         }
     }
 }
@@ -455,23 +477,32 @@ fun DownloadSandboxDialog(
     onCancel: () -> Unit,
 ) {
     val shieldColors = LocalShieldColors.current
+    val isApk = TrackerAndUrlEngine.isApkAsset(request.url, request.fileName, request.mimeType)
     AlertDialog(
         onDismissRequest = onCancel,
         icon = {
             Icon(
-                imageVector = if (request.isOnionSource) Icons.Rounded.WarningAmber else Icons.Rounded.Download,
+                imageVector = when {
+                    request.isOnionSource -> Icons.Rounded.WarningAmber
+                    isApk -> Icons.Rounded.InstallMobile
+                    else -> Icons.Rounded.Download
+                },
                 contentDescription = "Download security check",
                 tint = if (request.isOnionSource) shieldColors.warningAmber else shieldColors.surfaceAccent,
                 modifier = Modifier.size(30.dp),
             )
         },
         title = {
-            Text("Sandboxed Download Guard")
+            Text(if (isApk) "APK Package Guard" else "Sandboxed Download Guard")
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "Verify file details before saving to device storage:",
+                    text = if (isApk) {
+                        "Verify Android APK details before downloading. After it finishes, tap Install APK in Downloads Manager."
+                    } else {
+                        "Verify file details before saving to device storage:"
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Surface(
@@ -484,11 +515,31 @@ fun DownloadSandboxDialog(
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        Text(
-                            text = request.fileName,
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = request.fileName,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            if (isApk) {
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = shieldColors.surfaceAccent.copy(alpha = 0.2f),
+                                ) {
+                                    Text(
+                                        text = "APK",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = shieldColors.surfaceAccent,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                    )
+                                }
+                            }
+                        }
                         Text(
                             text = "Type: ${request.mimeType}",
                             style = MaterialTheme.typography.labelSmall,
@@ -515,7 +566,7 @@ fun DownloadSandboxDialog(
                 onClick = onConfirm,
                 modifier = Modifier.testTag("confirm_download_button"),
             ) {
-                Text("Download File")
+                Text(if (isApk) "Download APK" else "Download File")
             }
         },
         dismissButton = {
@@ -527,6 +578,206 @@ fun DownloadSandboxDialog(
             }
         },
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LinkActionSheet(
+    target: LinkMenuTarget,
+    onInstallToHomeScreenAndMenu: (title: String, url: String) -> Unit,
+    onPinToStartMenuOnly: (title: String, url: String) -> Unit,
+    onOpenInNewTab: (String) -> Unit,
+    onDownloadUrl: (String) -> Unit,
+    onCopyUrl: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val shieldColors = LocalShieldColors.current
+    val isApk = TrackerAndUrlEngine.isApkAsset(target.url, null, null)
+    val isOnion = TrackerAndUrlEngine.isOnionUrl(target.url)
+    val displayTitle = HomeAppShortcutHelper.deriveDisplayTitle(target.title, target.url)
+    val accent = when {
+        isOnion -> shieldColors.torAccent
+        else -> shieldColors.surfaceAccent
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = if (target.isSharedFromExternalApp) "Shared Link Ready" else displayTitle,
+                    style = MaterialTheme.typography.titleLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (isApk) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = shieldColors.secureGreen.copy(alpha = 0.18f),
+                    ) {
+                        Text(
+                            text = "APK",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = shieldColors.secureGreen,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
+                }
+                if (isOnion) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = shieldColors.torAccent.copy(alpha = 0.2f),
+                    ) {
+                        Text(
+                            text = ".ONION",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = shieldColors.torAccent,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
+                }
+            }
+
+            Text(
+                text = target.url,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 4.dp),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
+            )
+
+            LinkActionRow(
+                title = "Install to Mobile Home Screen & Menu",
+                subtitle = "Create a device Home Screen shortcut & save in Home Apps",
+                icon = Icons.Rounded.AddToHomeScreen,
+                accent = accent,
+                testTag = "link_action_install_home",
+                onClick = {
+                    onDismiss()
+                    onInstallToHomeScreenAndMenu(displayTitle, target.url)
+                },
+            )
+
+            LinkActionRow(
+                title = "Save to Home Apps Mobile Menu",
+                subtitle = "Pin to OnionShield's Start Page app grid",
+                icon = Icons.Rounded.PushPin,
+                accent = accent,
+                testTag = "link_action_pin_menu",
+                onClick = {
+                    onDismiss()
+                    onPinToStartMenuOnly(displayTitle, target.url)
+                },
+            )
+
+            LinkActionRow(
+                title = "Open Link in New Tab",
+                subtitle = "Launch safely in an isolated tab",
+                icon = Icons.AutoMirrored.Rounded.OpenInNew,
+                accent = MaterialTheme.colorScheme.onSurface,
+                testTag = "link_action_open_tab",
+                onClick = {
+                    onDismiss()
+                    onOpenInNewTab(target.url)
+                },
+            )
+
+            LinkActionRow(
+                title = if (isApk) "Download APK for Installation" else "Download Linked File",
+                subtitle = if (isApk) {
+                    "Download .apk via sandbox guard & open Android installer"
+                } else {
+                    "Queue link in Sandboxed Downloads Manager"
+                },
+                icon = if (isApk) Icons.Rounded.InstallMobile else Icons.Rounded.Download,
+                accent = if (isApk) shieldColors.secureGreen else MaterialTheme.colorScheme.onSurface,
+                testTag = "link_action_download",
+                onClick = {
+                    onDismiss()
+                    onDownloadUrl(target.url)
+                },
+            )
+
+            LinkActionRow(
+                title = "Copy Link Address",
+                subtitle = "Copy full URL to device clipboard",
+                icon = Icons.Rounded.ContentCopy,
+                accent = MaterialTheme.colorScheme.onSurfaceVariant,
+                testTag = "link_action_copy",
+                onClick = {
+                    onDismiss()
+                    onCopyUrl(target.url)
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun LinkActionRow(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    accent: Color,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.medium)
+            .clickable(onClick = onClick)
+            .testTag(testTag),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = title,
+                tint = accent,
+                modifier = Modifier.size(22.dp),
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
 }
 
 @Composable

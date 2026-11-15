@@ -80,14 +80,33 @@ object TorProxyController {
         }
     }
 
+    private const val ORBOT_PACKAGE = "org.torproject.android"
+    private const val ACTION_START_TOR = "org.torproject.android.intent.action.START"
+
     fun isOrbotInstalled(context: Context): Boolean {
         return runCatching {
-            context.packageManager.getLaunchIntentForPackage("org.torproject.android") != null
+            context.packageManager.getLaunchIntentForPackage(ORBOT_PACKAGE) != null
         }.getOrDefault(false)
     }
 
+    fun requestOrbotStart(context: Context): Boolean {
+        if (!isOrbotInstalled(context)) {
+            return launchOrbot(context)
+        }
+        val startIntent = Intent(ACTION_START_TOR).apply {
+            setPackage(ORBOT_PACKAGE)
+            putExtra("org.torproject.android.intent.extra.PACKAGE_NAME", context.packageName)
+        }
+        val broadcastSent = runCatching {
+            context.sendBroadcast(startIntent)
+            true
+        }.getOrDefault(false)
+        val launched = launchOrbot(context)
+        return broadcastSent || launched
+    }
+
     fun launchOrbot(context: Context): Boolean {
-        val launchIntent = context.packageManager.getLaunchIntentForPackage("org.torproject.android")
+        val launchIntent = context.packageManager.getLaunchIntentForPackage(ORBOT_PACKAGE)
         return if (launchIntent != null) {
             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(launchIntent)

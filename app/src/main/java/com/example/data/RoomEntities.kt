@@ -33,3 +33,24 @@ data class DownloadEntity(
     val sizeBytes: Long = 0L,
     val createdAt: Long = System.currentTimeMillis(),
 )
+
+@Entity(tableName = "vault_entries")
+data class VaultEntryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val entryType: String,
+    val titleCiphertext: String,
+    val secretCiphertext: String,
+    val urlCiphertext: String,
+    val isOnion: Boolean = false,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
+)
+
+@Entity(tableName = "pinned_apps")
+data class PinnedAppEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val url: String,
+    val isOnion: Boolean = false,
+    val createdAt: Long = System.currentTimeMillis(),
+)

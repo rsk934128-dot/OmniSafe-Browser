@@ -4,21 +4,60 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Database(
-    entities = [BookmarkEntity::class, HistoryEntity::class, DownloadEntity::class],
-    version = 1,
+    entities = [BookmarkEntity::class, HistoryEntity::class, DownloadEntity::class, VaultEntryEntity::class, PinnedAppEntity::class],
+    version = 3,
     exportSchema = false,
 )
 abstract class OnionShieldDatabase : RoomDatabase() {
     abstract fun bookmarkDao(): BookmarkDao
     abstract fun historyDao(): HistoryDao
     abstract fun downloadDao(): DownloadDao
+    abstract fun vaultDao(): VaultDao
+    abstract fun pinnedAppDao(): PinnedAppDao
 
     companion object {
         @Volatile
         private var INSTANCE: OnionShieldDatabase? = null
+
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `vault_entries` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `entryType` TEXT NOT NULL,
+                        `titleCiphertext` TEXT NOT NULL,
+                        `secretCiphertext` TEXT NOT NULL,
+                        `urlCiphertext` TEXT NOT NULL,
+                        `isOnion` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `pinned_apps` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `url` TEXT NOT NULL,
+                        `isOnion` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
 
         fun getInstance(context: Context): OnionShieldDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -26,7 +65,7 @@ abstract class OnionShieldDatabase : RoomDatabase() {
                     context.applicationContext,
                     OnionShieldDatabase::class.java,
                     "onionshield_local.db",
-                ).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { INSTANCE = it }
             }
         }
     }
@@ -36,10 +75,15 @@ class BrowserLibraryRepository(private val database: OnionShieldDatabase) {
     private val bookmarkDao = database.bookmarkDao()
     private val historyDao = database.historyDao()
     private val downloadDao = database.downloadDao()
+    private val vaultDao = database.vaultDao()
+    private val pinnedAppDao = database.pinnedAppDao()
 
     val bookmarks: Flow<List<BookmarkEntity>> = bookmarkDao.observeAll()
     val history: Flow<List<HistoryEntity>> = historyDao.observeAll()
     val downloads: Flow<List<DownloadEntity>> = downloadDao.observeAll()
+    val vaultEntries: Flow<List<VaultEntryEntity>> = vaultDao.observeAll()
+    val vaultCount: Flow<Int> = vaultDao.observeCount()
+    val pinnedApps: Flow<List<PinnedAppEntity>> = pinnedAppDao.observeAll()
 
     fun observeIsBookmarked(url: String): Flow<Boolean> = bookmarkDao.observeIsBookmarked(url)
 
@@ -97,4 +141,41 @@ class BrowserLibraryRepository(private val database: OnionShieldDatabase) {
     suspend fun deleteDownload(id: Long) = downloadDao.deleteById(id)
 
     suspend fun clearDownloads() = downloadDao.clearAll()
+
+    suspend fun insertVaultEntry(entry: VaultEntryEntity): Long = vaultDao.insert(entry)
+
+    suspend fun deleteVaultEntry(id: Long) = vaultDao.deleteById(id)
+
+    suspend fun clearVault() = vaultDao.clearAll()
+
+    suspend fun ensureDefaultHomeAppsSeeded() {
+        if (pinnedAppDao.count() > 0) return
+        val defaults = listOf(
+            PinnedAppEntity(title = "YouTube", url = "https://m.youtube.com", isOnion = false),
+            PinnedAppEntity(title = "DuckDuckGo", url = "https://duckduckgo.com", isOnion = false),
+            PinnedAppEntity(title = "Wikipedia", url = "https://en.m.wikipedia.org", isOnion = false),
+            PinnedAppEntity(title = "GitHub", url = "https://github.com", isOnion = false),
+        )
+        defaults.forEach { pinnedAppDao.insert(it) }
+    }
+
+    suspend fun pinHomeApp(title: String, url: String) {
+        if (url == ABOUT_START_URL || url.isBlank()) return
+        pinnedAppDao.deleteByUrl(url)
+        pinnedAppDao.insert(
+            PinnedAppEntity(
+                title = title.ifBlank { UriFallbackTitle(url) },
+                url = url,
+                isOnion = url.contains(".onion", ignoreCase = true),
+            ),
+        )
+    }
+
+    suspend fun removePinnedApp(id: Long) = pinnedAppDao.deleteById(id)
+
+    private fun UriFallbackTitle(url: String): String {
+        return runCatching {
+            android.net.Uri.parse(url).host?.removePrefix("www.")?.removePrefix("m.") ?: url
+        }.getOrDefault(url)
+    }
 }

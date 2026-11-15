@@ -128,13 +128,16 @@ fun BrowserWebView(
                         onUrlUpgraded = onUrlUpgraded,
                     )
                 (webView.parent as? ViewGroup)?.removeView(webView)
-                applySecurityWebSettings(
-                    webView = webView,
-                    javaScriptEnabled = javaScriptEnabled,
-                    enforceHttps = enforceHttps,
-                    blockThirdPartyCookies = blockThirdPartyCookies,
-                    enableSafeBrowsing = enableSafeBrowsing,
-                )
+                webView.onResume()
+                if (externalWebViewFactory == null) {
+                    applySecurityWebSettings(
+                        webView = webView,
+                        javaScriptEnabled = javaScriptEnabled,
+                        enforceHttps = enforceHttps,
+                        blockThirdPartyCookies = blockThirdPartyCookies,
+                        enableSafeBrowsing = enableSafeBrowsing,
+                    )
+                }
                 managedWebView = webView
                 if (proxyReady && targetUrl != ABOUT_START_URL && webView.url.isNullOrBlank()) {
                     webView.loadUrl(targetUrl)
@@ -142,15 +145,17 @@ fun BrowserWebView(
                 webView
             },
             update = { webView ->
-                applySecurityWebSettings(
-                    webView = webView,
-                    javaScriptEnabled = javaScriptEnabled,
-                    enforceHttps = enforceHttps,
-                    blockThirdPartyCookies = blockThirdPartyCookies,
-                    enableSafeBrowsing = enableSafeBrowsing,
-                )
-                if (proxyReady && targetUrl != ABOUT_START_URL && webView.url != targetUrl && externalWebViewFactory == null) {
-                    webView.loadUrl(targetUrl)
+                if (externalWebViewFactory == null) {
+                    applySecurityWebSettings(
+                        webView = webView,
+                        javaScriptEnabled = javaScriptEnabled,
+                        enforceHttps = enforceHttps,
+                        blockThirdPartyCookies = blockThirdPartyCookies,
+                        enableSafeBrowsing = enableSafeBrowsing,
+                    )
+                    if (proxyReady && targetUrl != ABOUT_START_URL && webView.url != targetUrl) {
+                        webView.loadUrl(targetUrl)
+                    }
                 }
             },
             modifier = modifier

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.Gavel
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Https
+import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Router
@@ -59,11 +60,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.example.browser.TorProxyController
+import com.example.data.CircuitPrivacyLevel
 import com.example.data.ProxyProtocol
 import com.example.data.SearchEngine
 import com.example.data.TorProxyState
 import com.example.ui.BrowserUiState
 import com.example.ui.BrowserViewModel
+import com.example.ui.components.CircuitDiagnosticSheet
 import com.example.ui.theme.LocalShieldColors
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -80,6 +83,7 @@ fun SecuritySettingsScreen(
     var hostInput by remember(config.torProxyHost) { mutableStateOf(config.torProxyHost) }
     var portInput by remember(config.torProxyPort) { mutableStateOf(config.torProxyPort.toString()) }
     var selectedProtocol by remember(config.torProxyProtocol) { mutableStateOf(config.torProxyProtocol) }
+    var showCircuitDiagnostics by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -208,14 +212,67 @@ fun SecuritySettingsScreen(
                                 Text("Save & Test")
                             }
                             OutlinedButton(
-                                onClick = { TorProxyController.launchOrbot(context) },
+                                onClick = { TorProxyController.requestOrbotStart(context) },
                                 modifier = Modifier
                                     .weight(1f)
                                     .testTag("launch_orbot_button"),
                             ) {
                                 Icon(Icons.Rounded.Security, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text(if (TorProxyController.isOrbotInstalled(context)) "Open Orbot" else "Get Orbot")
+                                Text(if (TorProxyController.isOrbotInstalled(context)) "Start Orbot" else "Get Orbot")
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = { showCircuitDiagnostics = true },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("settings_circuit_diagnostics_button"),
+                        ) {
+                            Icon(Icons.Rounded.Hub, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("V3 .onion Circuit & Bridge Diagnostics (${config.bridgeTransport.label})")
+                        }
+                    }
+                }
+            }
+
+            // Tor Circuit Privacy Level (Standard / Strict) Card
+            item {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 640.dp),
+                    shape = MaterialTheme.shapes.large,
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(Icons.Rounded.Security, contentDescription = null, tint = shieldColors.surfaceAccent)
+                            Column {
+                                Text("Tor Circuit Privacy Level", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    text = config.circuitPrivacyLevel.summary,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CircuitPrivacyLevel.entries.forEach { level ->
+                                FilterChip(
+                                    selected = config.circuitPrivacyLevel == level,
+                                    onClick = { viewModel.setCircuitPrivacyLevel(level) },
+                                    label = { Text(level.label) },
+                                    modifier = Modifier.testTag("privacy_level_${level.name.lowercase()}"),
+                                )
                             }
                         }
                     }
@@ -361,6 +418,19 @@ fun SecuritySettingsScreen(
                 }
             }
         }
+    }
+
+    if (showCircuitDiagnostics) {
+        CircuitDiagnosticSheet(
+            tab = uiState.activeTab,
+            config = config,
+            proxyState = uiState.torProxyState,
+            diagnostic = uiState.circuitDiagnostic,
+            onRunDiagnostics = { viewModel.runCircuitDiagnostics(verifyExit = true) },
+            onRequestNewCircuit = viewModel::requestNewTorCircuit,
+            onSaveBridgeConfig = viewModel::saveBridgeConfiguration,
+            onDismiss = { showCircuitDiagnostics = false },
+        )
     }
 }
 

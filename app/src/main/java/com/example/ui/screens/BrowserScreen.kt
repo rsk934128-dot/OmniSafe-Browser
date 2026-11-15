@@ -30,16 +30,20 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
+import androidx.compose.material.icons.rounded.AddToHomeScreen
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CodeOff
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.EnhancedEncryption
 import androidx.compose.material.icons.rounded.Gavel
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
@@ -70,24 +74,34 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.browser.TorProxyController
+import com.example.browser.TrackerAndUrlEngine
+import com.example.data.ABOUT_START_URL
 import com.example.data.BrowserMode
 import com.example.data.BrowserTab
 import com.example.data.TorProxyState
 import com.example.ui.BrowserUiState
 import com.example.ui.BrowserViewModel
 import com.example.ui.components.BrowserWebView
+import com.example.ui.components.CircuitDiagnosticSheet
 import com.example.ui.components.DisclaimerDialog
 import com.example.ui.components.DownloadSandboxDialog
+import com.example.ui.components.InstallHomeAppDialog
+import com.example.ui.components.LinkActionSheet
 import com.example.ui.components.QuickShieldSheet
 import com.example.ui.components.ShredConfirmDialog
 import com.example.ui.components.StartPageContent
@@ -102,24 +116,36 @@ fun BrowserScreen(
     onOpenSecuritySettings: () -> Unit,
     onOpenLibrary: () -> Unit,
     onOpenDownloads: () -> Unit,
+    onOpenVault: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val focusManager = LocalFocusManager.current
     val shieldColors = LocalShieldColors.current
 
+    val pinnedApps by viewModel.pinnedApps.collectAsStateWithLifecycle()
+    val fullscreenCustomView by viewModel.fullscreenCustomView.collectAsStateWithLifecycle()
+
     var showTabSwitcher by remember { mutableStateOf(false) }
     var showQuickShields by remember { mutableStateOf(false) }
+    var showCircuitDiagnostics by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
+    var showCustomLinkInstallDialog by remember { mutableStateOf(false) }
 
     val activeTab = uiState.activeTab
     val isTorMode = uiState.securityConfig.browserMode == BrowserMode.TOR_ONION
+    val activeHost = remember(activeTab.url) { TrackerAndUrlEngine.normalizeHost(activeTab.url) }
+    val isHostJsTrusted = activeHost != null && uiState.securityConfig.trustedJsHosts.contains(activeHost)
+    val effectiveNoScript = uiState.securityConfig.noScriptEnabled && !isHostJsTrusted
     val accentColor by animateColorAsState(
         targetValue = if (isTorMode) shieldColors.torAccent else shieldColors.surfaceAccent,
         label = "browserAccent",
     )
 
-    BackHandler(enabled = !activeTab.isStartPage || activeTab.canGoBack) {
-        if (!viewModel.goBack()) {
+    BackHandler(enabled = fullscreenCustomView != null || !activeTab.isStartPage || activeTab.canGoBack) {
+        if (fullscreenCustomView != null) {
+            viewModel.exitFullscreenVideo()
+        } else if (!viewModel.goBack()) {
             (context as? Activity)?.finish()
         }
     }
@@ -153,12 +179,37 @@ fun BrowserScreen(
                         onSelectMode = { viewModel.switchBrowserMode(it) },
                     )
 
-                    ProxyStatusChip(
-                        mode = uiState.securityConfig.browserMode,
-                        proxyState = uiState.torProxyState,
-                        noScriptEnabled = uiState.securityConfig.noScriptEnabled,
-                        onClick = { showQuickShields = true },
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        ProxyStatusChip(
+                            mode = uiState.securityConfig.browserMode,
+                            proxyState = uiState.torProxyState,
+                            noScriptEnabled = effectiveNoScript,
+                            onClick = { showQuickShields = true },
+                        )
+
+                        IconButton(
+                            onClick = { showCircuitDiagnostics = true },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("top_circuit_shield_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Shield,
+                                contentDescription = "Tor Circuit & Bridge Diagnostics",
+                                tint = when {
+                                    uiState.circuitDiagnostic.isTorExitVerified == true ||
+                                        uiState.torProxyState is TorProxyState.Connected -> shieldColors.secureGreen
+                                    isTorMode && uiState.torProxyState is TorProxyState.Unreachable -> shieldColors.warningAmber
+                                    isTorMode -> shieldColors.torAccent
+                                    else -> shieldColors.surfaceAccent
+                                },
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
                 }
 
                 // Omnibox Row
@@ -262,6 +313,24 @@ fun BrowserScreen(
                     }
 
                     if (!activeTab.isStartPage) {
+                        IconButton(
+                            onClick = {
+                                viewModel.installLinkToHomeAndMenu(
+                                    context = context,
+                                    rawTitle = activeTab.title,
+                                    rawUrl = activeTab.url,
+                                )
+                            },
+                            modifier = Modifier
+                                .size(42.dp)
+                                .testTag("omnibox_install_home_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.AddToHomeScreen,
+                                contentDescription = "Install page to Home Screen",
+                                tint = accentColor,
+                            )
+                        }
                         IconButton(
                             onClick = { viewModel.reloadOrStop() },
                             modifier = Modifier
@@ -403,12 +472,52 @@ fun BrowserScreen(
                                 expanded = showOverflowMenu,
                                 onDismissRequest = { showOverflowMenu = false },
                             ) {
+                                if (!activeTab.isStartPage) {
+                                    DropdownMenuItem(
+                                        text = { Text("Install to Home Screen (PWA)") },
+                                        leadingIcon = { Icon(Icons.Rounded.AddToHomeScreen, contentDescription = null) },
+                                        onClick = {
+                                            showOverflowMenu = false
+                                            viewModel.installLinkToHomeAndMenu(
+                                                context = context,
+                                                rawTitle = activeTab.title,
+                                                rawUrl = activeTab.url,
+                                            )
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Pin to Start Page Apps") },
+                                        leadingIcon = { Icon(Icons.Rounded.PushPin, contentDescription = null) },
+                                        onClick = {
+                                            showOverflowMenu = false
+                                            viewModel.pinAppToStartPage(activeTab.title, activeTab.url)
+                                        },
+                                    )
+                                } else {
+                                    DropdownMenuItem(
+                                        text = { Text("Install Any Link to Home") },
+                                        leadingIcon = { Icon(Icons.Rounded.AddToHomeScreen, contentDescription = null) },
+                                        onClick = {
+                                            showOverflowMenu = false
+                                            showCustomLinkInstallDialog = true
+                                        },
+                                    )
+                                }
+                                HorizontalDivider()
                                 DropdownMenuItem(
                                     text = { Text("Bookmarks & History") },
                                     leadingIcon = { Icon(Icons.Rounded.Bookmark, contentDescription = null) },
                                     onClick = {
                                         showOverflowMenu = false
                                         onOpenLibrary()
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Secure Vault (AES-256)") },
+                                    leadingIcon = { Icon(Icons.Rounded.EnhancedEncryption, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        onOpenVault()
                                     },
                                 )
                                 DropdownMenuItem(
@@ -454,7 +563,16 @@ fun BrowserScreen(
                     torProxyState = uiState.torProxyState,
                     totalTrackersBlocked = uiState.totalTrackersBlocked,
                     totalScriptsBlocked = uiState.totalScriptsBlocked,
+                    pinnedApps = pinnedApps,
                     onNavigateUrl = { url -> viewModel.openUrlOrSearch(url) },
+                    onInstallHomeApp = { rawTitle, rawUrl ->
+                        viewModel.installLinkToHomeAndMenu(
+                            context = context,
+                            rawTitle = rawTitle,
+                            rawUrl = rawUrl,
+                        )
+                    },
+                    onRemovePinnedApp = viewModel::removePinnedApp,
                     onToggleNoScript = viewModel::setNoScript,
                     onToggleHttpsEverywhere = viewModel::setHttpsEverywhere,
                     onToggleWebRtc = viewModel::setWebRtcLeakProtection,
@@ -464,40 +582,110 @@ fun BrowserScreen(
                 )
             } else {
                 val cfg = uiState.securityConfig
-                BrowserWebView(
-                    url = activeTab.url,
-                    tabKey = activeTab.id,
-                    javaScriptEnabled = !cfg.noScriptEnabled,
-                    enforceHttps = cfg.httpsEverywhereEnabled,
-                    useTorSocks5Proxy = cfg.browserMode == BrowserMode.TOR_ONION,
-                    torProxyHost = cfg.torProxyHost,
-                    torProxyPort = cfg.torProxyPort,
-                    torProxyScheme = cfg.torProxyProtocol.scheme,
-                    blockThirdPartyCookies = cfg.blockThirdPartyCookies,
-                    manageProxyOverride = false,
-                    externalWebViewFactory = { _ ->
-                        val wv = viewModel.webViewPool.getOrCreateWebView(
-                            tabId = activeTab.id,
-                            seed = activeTab.fingerprintSeed,
-                            config = cfg,
-                        )
-                        if (wv.url.isNullOrBlank() && !activeTab.isStartPage) {
-                            wv.loadUrl(activeTab.url)
+                Column(modifier = Modifier.fillMaxSize()) {
+                    if (effectiveNoScript && activeTab.blockedScriptsCount > 0) {
+                        Surface(
+                            color = shieldColors.warningAmberContainer.copy(alpha = 0.85f),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.CodeOff,
+                                        contentDescription = "Scripts blocked",
+                                        tint = shieldColors.warningAmber,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Text(
+                                        text = "No-Script blocked ${activeTab.blockedScriptsCount} script(s) — site may look blank",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                TextButton(
+                                    onClick = { viewModel.trustCurrentSiteJavascript() },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                    modifier = Modifier.testTag("allow_js_site_button"),
+                                ) {
+                                    Text(
+                                        text = "Allow JS",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = shieldColors.warningAmber,
+                                    )
+                                }
+                            }
                         }
-                        wv
-                    },
-                )
+                    }
 
-                // Error / Onion Proxy Recovery Overlay
-                if (activeTab.lastError != null) {
-                    WebErrorOverlay(
-                        tab = activeTab,
-                        torProxyState = uiState.torProxyState,
-                        proxyEndpoint = uiState.securityConfig.torEndpoint,
-                        onRetry = { viewModel.reloadOrStop() },
-                        onSwitchToSurface = { viewModel.switchBrowserMode(BrowserMode.SURFACE) },
-                        onOpenOrbot = { TorProxyController.launchOrbot(context) },
-                        onOpenProxySettings = onOpenSecuritySettings,
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        BrowserWebView(
+                            url = activeTab.url,
+                            tabKey = activeTab.id,
+                            javaScriptEnabled = !effectiveNoScript,
+                            enforceHttps = cfg.httpsEverywhereEnabled,
+                            useTorSocks5Proxy = cfg.browserMode == BrowserMode.TOR_ONION,
+                            torProxyHost = cfg.torProxyHost,
+                            torProxyPort = cfg.torProxyPort,
+                            torProxyScheme = cfg.torProxyProtocol.scheme,
+                            blockThirdPartyCookies = cfg.blockThirdPartyCookies,
+                            manageProxyOverride = false,
+                            externalWebViewFactory = { viewContext ->
+                                val wv = viewModel.webViewPool.getOrCreateWebView(
+                                    tabId = activeTab.id,
+                                    seed = activeTab.fingerprintSeed,
+                                    config = cfg,
+                                    hostContext = viewContext,
+                                )
+                                if (wv.url.isNullOrBlank() && !activeTab.isStartPage) {
+                                    viewModel.webViewPool.loadUrlForTab(
+                                        tabId = activeTab.id,
+                                        seed = activeTab.fingerprintSeed,
+                                        config = cfg,
+                                        url = activeTab.url,
+                                    )
+                                }
+                                wv
+                            },
+                        )
+
+                        // Error / Onion Proxy Recovery Overlay
+                        if (activeTab.lastError != null) {
+                            WebErrorOverlay(
+                                tab = activeTab,
+                                torProxyState = uiState.torProxyState,
+                                proxyEndpoint = uiState.securityConfig.torEndpoint,
+                                onRetry = { viewModel.reloadOrStop() },
+                                onSwitchToSurface = { viewModel.switchBrowserMode(BrowserMode.SURFACE) },
+                                onOpenOrbot = { TorProxyController.launchOrbot(context) },
+                                onOpenProxySettings = onOpenSecuritySettings,
+                            )
+                        }
+                    }
+                }
+            }
+
+            fullscreenCustomView?.let { customVideo ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black),
+                ) {
+                    AndroidView(
+                        factory = { customVideo },
+                        modifier = Modifier.fillMaxSize(),
                     )
                 }
             }
@@ -549,8 +737,25 @@ fun BrowserScreen(
             onToggleTrackerBlocker = viewModel::setTrackerBlocker,
             onToggleThirdPartyCookies = viewModel::setBlockThirdPartyCookies,
             onRotateSeed = viewModel::regenerateFingerprintSeed,
+            onOpenCircuitDiagnostics = {
+                showQuickShields = false
+                showCircuitDiagnostics = true
+            },
             onOpenFullSettings = onOpenSecuritySettings,
             onDismiss = { showQuickShields = false },
+        )
+    }
+
+    if (showCircuitDiagnostics) {
+        CircuitDiagnosticSheet(
+            tab = activeTab,
+            config = uiState.securityConfig,
+            proxyState = uiState.torProxyState,
+            diagnostic = uiState.circuitDiagnostic,
+            onRunDiagnostics = { viewModel.runCircuitDiagnostics(verifyExit = true) },
+            onRequestNewCircuit = viewModel::requestNewTorCircuit,
+            onSaveBridgeConfig = viewModel::saveBridgeConfiguration,
+            onDismiss = { showCircuitDiagnostics = false },
         )
     }
 
@@ -570,6 +775,39 @@ fun BrowserScreen(
         ShredConfirmDialog(
             onConfirm = viewModel::confirmShredSession,
             onDismiss = viewModel::dismissShredConfirm,
+        )
+    }
+
+    uiState.linkMenuTarget?.let { target ->
+        LinkActionSheet(
+            target = target,
+            onInstallToHomeScreenAndMenu = { title, url ->
+                viewModel.installLinkToHomeAndMenu(context, title, url)
+            },
+            onPinToStartMenuOnly = { title, url ->
+                viewModel.pinAppToStartPage(title, url)
+            },
+            onOpenInNewTab = { url ->
+                viewModel.openExternalLaunchUrl(url)
+            },
+            onDownloadUrl = { url ->
+                viewModel.requestDirectDownload(url)
+            },
+            onCopyUrl = { url ->
+                clipboard.setText(AnnotatedString(url))
+                viewModel.showStatusBanner("Copied link: $url")
+            },
+            onDismiss = viewModel::dismissLinkActionSheet,
+        )
+    }
+
+    if (showCustomLinkInstallDialog) {
+        InstallHomeAppDialog(
+            onDismiss = { showCustomLinkInstallDialog = false },
+            onConfirm = { rawTitle, rawUrl ->
+                showCustomLinkInstallDialog = false
+                viewModel.installLinkToHomeAndMenu(context, rawTitle, rawUrl)
+            },
         )
     }
 }

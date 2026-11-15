@@ -1,11 +1,26 @@
 package com.example.browser
 
+import com.example.data.BrowserMode
+
 object PrivacyScripts {
 
     data class SpoofedUserAgentProfile(
         val label: String,
         val userAgent: String,
         val platform: String,
+    )
+
+    private val surfaceMobileProfiles = listOf(
+        SpoofedUserAgentProfile(
+            label = "Chrome Android Mobile",
+            userAgent = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+            platform = "Linux armv8l",
+        ),
+        SpoofedUserAgentProfile(
+            label = "Firefox Android Mobile",
+            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:131.0) Gecko/131.0 Firefox/131.0",
+            platform = "Linux armv8l",
+        ),
     )
 
     private val userAgentProfiles = listOf(
@@ -32,17 +47,23 @@ object PrivacyScripts {
     )
 
     fun profileForSeed(seed: String): SpoofedUserAgentProfile {
-        val index = (seed.hashCode() and 0x7FFFFFFF) % userAgentProfiles.size
-        return userAgentProfiles[index]
+        return profileForSeed(seed, BrowserMode.SURFACE)
+    }
+
+    fun profileForSeed(seed: String, mode: BrowserMode): SpoofedUserAgentProfile {
+        val pool = if (mode == BrowserMode.SURFACE) surfaceMobileProfiles else userAgentProfiles
+        val index = (seed.hashCode() and 0x7FFFFFFF) % pool.size
+        return pool[index]
     }
 
     fun buildHardeningScript(
         seed: String,
         enableWebRtcGuard: Boolean,
         enableFingerprintRandomization: Boolean,
+        mode: BrowserMode = BrowserMode.SURFACE,
     ): String {
         if (!enableWebRtcGuard && !enableFingerprintRandomization) return ""
-        val profile = profileForSeed(seed)
+        val profile = profileForSeed(seed, mode)
         val numericNoise = ((seed.hashCode() and 0xFF) % 5) + 1
         val cores = listOf(2, 4, 8)[(seed.hashCode() and 0x7FFFFFFF) % 3]
         val memoryGb = listOf(4, 8)[(seed.hashCode() and 0x7FFFFFFF) % 2]

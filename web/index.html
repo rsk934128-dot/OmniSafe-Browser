@@ -107,20 +107,31 @@
               অ্যান্ড্রয়েড ফোনে সম্পূর্ণ Tor (<code>127.0.0.1:9050</code>), No-Script ও WebView প্রাইভেসি ব্যবহারের জন্য GitHub Release থেকে APK ডাউনলোড করুন।
             </p>
           </div>
-          <button id="btnInstallPwa" class="secondary-btn hidden" type="button">Install Web App</button>
+          <button id="btnInstallPwa" class="secondary-btn" type="button">Install Web App</button>
+        </div>
+
+        <div id="pwaInstallGuide" class="notice-banner install-guide-banner" aria-hidden="true">
+          <div class="install-guide-row">
+            <div id="pwaInstallGuideText">
+              <strong>Add to Home Screen (PWA):</strong>
+              Android Chrome-এ উপরের <strong>⋮</strong> মেনু থেকে <strong>"Install app / Add to Home screen"</strong> ট্যাপ করুন, অথবা iPhone Safari-তে <strong>Share → Add to Home Screen</strong> নির্বাচন করুন।
+            </div>
+            <button id="btnGuideInstallNow" class="primary-btn hidden" type="button">Add to Home Screen</button>
+          </div>
         </div>
 
         <div class="repo-fetch-row">
           <input
             id="githubRepoInput"
             type="text"
-            placeholder="GitHub repository (e.g. username/OnionShield)"
+            value="rsk934128-dot/OmniSafe-Browser"
+            placeholder="GitHub repository (e.g. rsk934128-dot/OmniSafe-Browser)"
             aria-label="GitHub repository owner/name"
           />
           <button id="btnFetchRelease" class="primary-btn" type="button">Fetch Latest APK</button>
         </div>
         <div id="releaseStatus" class="release-status">
-          Enter your GitHub <code>owner/repo</code> after publishing a release tag (<code>v1.0.0</code>) to pull the direct APK download link, SHA-256 checksum, and mobile QR code.
+          Auto-loading latest Android APK release &amp; mobile QR code from <code>rsk934128-dot/OmniSafe-Browser</code>…
         </div>
         <div id="apkQrContainer" class="apk-qr-card hidden">
           <div class="apk-qr-frame">
