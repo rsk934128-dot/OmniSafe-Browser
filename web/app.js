@@ -44,7 +44,14 @@
   const githubRepoInput = document.getElementById('githubRepoInput');
   const btnFetchRelease = document.getElementById('btnFetchRelease');
   const releaseStatus = document.getElementById('releaseStatus');
+  const apkQrContainer = document.getElementById('apkQrContainer');
+  const apkQrCanvas = document.getElementById('apkQrCanvas');
+  const apkQrUrlLabel = document.getElementById('apkQrUrlLabel');
+  const btnCopyApkLink = document.getElementById('btnCopyApkLink');
+  const btnDownloadQr = document.getElementById('btnDownloadQr');
   const btnInstallPwa = document.getElementById('btnInstallPwa');
+  let latestApkUrl = '';
+  let latestReleaseTag = 'latest';
 
   function setMode(mode) {
     currentMode = mode;
@@ -198,10 +205,12 @@
     const repo = githubRepoInput.value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\/$/, '');
     if (!repo.includes('/')) {
       releaseStatus.textContent = 'Please enter a valid GitHub repository in owner/repo format.';
+      apkQrContainer.classList.add('hidden');
       return;
     }
     localStorage.setItem('onionshield_github_repo', repo);
     releaseStatus.textContent = `Fetching latest release from github.com/${repo}…`;
+    apkQrContainer.classList.add('hidden');
 
     try {
       const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`);
@@ -217,14 +226,43 @@
         return;
       }
 
+      latestApkUrl = apkAsset.browser_download_url;
+      latestReleaseTag = data.tag_name || 'latest';
+
       releaseStatus.innerHTML = `
-        <div><strong>Latest Release:</strong> ${data.tag_name} (${(apkAsset.size / (1024 * 1024)).toFixed(2)} MB)</div>
-        <a class="apk-download-btn" href="${apkAsset.browser_download_url}" rel="noopener">Download ${apkAsset.name}</a>
+        <div><strong>Latest Release:</strong> ${latestReleaseTag} (${(apkAsset.size / (1024 * 1024)).toFixed(2)} MB)</div>
+        <a class="apk-download-btn" href="${latestApkUrl}" rel="noopener">Download ${apkAsset.name}</a>
         ${shaAsset ? `<a class="secondary-btn" style="display:inline-block;text-decoration:none;margin-top:10px;" href="${shaAsset.browser_download_url}" rel="noopener">SHA-256</a>` : ''}
       `;
+
+      if (window.OnionShieldQR && apkQrCanvas) {
+        window.OnionShieldQR.renderToCanvas(apkQrCanvas, latestApkUrl, {
+          size: 220,
+          quietModules: 4,
+          darkColor: '#0B0F19',
+          lightColor: '#FFFFFF',
+        });
+        apkQrUrlLabel.textContent = latestApkUrl;
+        apkQrContainer.classList.remove('hidden');
+      }
     } catch (err) {
       releaseStatus.textContent = `Could not fetch release: ${err.message}`;
     }
+  });
+
+  btnCopyApkLink.addEventListener('click', async () => {
+    if (!latestApkUrl) return;
+    await navigator.clipboard.writeText(latestApkUrl);
+    btnCopyApkLink.textContent = 'Copied!';
+    setTimeout(() => { btnCopyApkLink.textContent = 'Copy APK Link'; }, 1500);
+  });
+
+  btnDownloadQr.addEventListener('click', () => {
+    if (!apkQrCanvas || !latestApkUrl) return;
+    const link = document.createElement('a');
+    link.download = `OnionShield-${latestReleaseTag}-apk-qr.png`;
+    link.href = apkQrCanvas.toDataURL('image/png');
+    link.click();
   });
 
   window.addEventListener('beforeinstallprompt', (e) => {

@@ -318,6 +318,55 @@ input:focus {
   border-radius: 10px;
 }
 
+.apk-qr-card {
+  margin-top: 14px;
+  padding: 16px;
+  border-radius: 16px;
+  background: var(--surface-2);
+  border: 1px solid rgba(0, 229, 209, 0.35);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+}
+
+.apk-qr-frame {
+  background: #FFFFFF;
+  padding: 10px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.apk-qr-frame canvas {
+  display: block;
+  width: 176px;
+  height: 176px;
+  image-rendering: pixelated;
+}
+
+.apk-qr-meta {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.apk-qr-meta h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.qr-url-preview {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+  color: var(--cyan);
+  word-break: break-all;
+}
+
 .footer {
   text-align: center;
   color: var(--muted);

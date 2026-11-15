@@ -120,7 +120,23 @@
           <button id="btnFetchRelease" class="primary-btn" type="button">Fetch Latest APK</button>
         </div>
         <div id="releaseStatus" class="release-status">
-          Enter your GitHub <code>owner/repo</code> after publishing a release tag (<code>v1.0.0</code>) to pull the direct APK download link and SHA-256 checksum.
+          Enter your GitHub <code>owner/repo</code> after publishing a release tag (<code>v1.0.0</code>) to pull the direct APK download link, SHA-256 checksum, and mobile QR code.
+        </div>
+        <div id="apkQrContainer" class="apk-qr-card hidden">
+          <div class="apk-qr-frame">
+            <canvas id="apkQrCanvas" aria-label="QR code for latest APK download link"></canvas>
+          </div>
+          <div class="apk-qr-meta">
+            <h3>Scan on Mobile to Download APK</h3>
+            <p class="muted">
+              ফোনের ক্যামেরা দিয়ে এই QR কোড স্ক্যান করে সরাসরি সর্বশেষ APK ডাউনলোড করুন।
+            </p>
+            <div id="apkQrUrlLabel" class="qr-url-preview"></div>
+            <div class="sanitizer-actions">
+              <button id="btnCopyApkLink" class="secondary-btn" type="button">Copy APK Link</button>
+              <button id="btnDownloadQr" class="secondary-btn" type="button">Save QR PNG</button>
+            </div>
+          </div>
         </div>
       </section>
     </main>
@@ -130,6 +146,7 @@
     </footer>
   </div>
 
+  <script src="/qr.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

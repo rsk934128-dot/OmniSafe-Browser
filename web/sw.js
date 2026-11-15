@@ -1,5 +1,5 @@
-const CACHE_NAME = 'onionshield-web-v1';
-const ASSETS = ['/', '/index.html', '/styles.css', '/app.js', '/icon.svg', '/manifest.webmanifest'];
+const CACHE_NAME = 'onionshield-web-v2';
+const ASSETS = ['/', '/index.html', '/styles.css', '/qr.js', '/app.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
