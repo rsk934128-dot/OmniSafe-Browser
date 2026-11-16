@@ -18,9 +18,11 @@ import com.example.data.BrowserMode
 import com.example.ui.BrowserViewModel
 import com.example.ui.Routes
 import com.example.ui.screens.BrowserScreen
+import com.example.ui.screens.CloudSyncRoute
 import com.example.ui.screens.DownloadsScreen
 import com.example.ui.screens.LibraryScreen
 import com.example.ui.screens.SecuritySettingsScreen
+import com.example.ui.screens.SessionGuardScreen
 import com.example.ui.screens.VaultScreen
 import com.example.ui.theme.OnionShieldTheme
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,6 +47,11 @@ class MainActivity : FragmentActivity() {
             val uiState by browserViewModel.uiState.collectAsStateWithLifecycle()
             val isBookmarked by browserViewModel.isCurrentPageBookmarked.collectAsStateWithLifecycle()
             val bookmarks by browserViewModel.bookmarks.collectAsStateWithLifecycle()
+            val pinnedApps by browserViewModel.pinnedApps.collectAsStateWithLifecycle()
+            val sessionRoundLogs by browserViewModel.sessionRoundLogs.collectAsStateWithLifecycle()
+            val sessionGuardStats by browserViewModel.sessionGuardStats.collectAsStateWithLifecycle()
+            val monitorSyncStatus by browserViewModel.monitorSyncStatus.collectAsStateWithLifecycle()
+            val isForegroundServiceRunning by browserViewModel.isForegroundServiceRunning.collectAsStateWithLifecycle()
             val history by browserViewModel.history.collectAsStateWithLifecycle()
             val downloads by browserViewModel.downloads.collectAsStateWithLifecycle()
             val externalIntent by pendingExternalIntent.collectAsStateWithLifecycle()
@@ -92,6 +99,12 @@ class MainActivity : FragmentActivity() {
                             },
                             onOpenVault = {
                                 navController.navigate(Routes.ROUTE_VAULT)
+                            },
+                            onOpenCloudSync = {
+                                navController.navigate(Routes.ROUTE_CLOUD_SYNC)
+                            },
+                            onOpenSessionGuard = {
+                                navController.navigate(Routes.ROUTE_SESSION_GUARD)
                             },
                         )
                     }
@@ -148,6 +161,39 @@ class MainActivity : FragmentActivity() {
                             onDeleteEntry = browserViewModel::deleteVaultEntry,
                             onWipeVault = browserViewModel::wipeEntireVault,
                             onOpenUrl = { url -> browserViewModel.openUrlOrSearch(url) },
+                            onNavigateBack = { navController.popBackStack() },
+                        )
+                    }
+
+                    composable(Routes.ROUTE_CLOUD_SYNC) {
+                        CloudSyncRoute(
+                            localBookmarks = bookmarks,
+                            localPinnedApps = pinnedApps,
+                            localHistory = history,
+                            onRestoreToHomeScreen = { title, url ->
+                                browserViewModel.installLinkToHomeAndMenu(this@MainActivity, title, url)
+                            },
+                            onOpenUrl = { url -> browserViewModel.openUrlOrSearch(url) },
+                            onNavigateBack = { navController.popBackStack() },
+                        )
+                    }
+
+                    composable(Routes.ROUTE_SESSION_GUARD) {
+                        SessionGuardScreen(
+                            config = uiState.securityConfig,
+                            stats = sessionGuardStats,
+                            rounds = sessionRoundLogs,
+                            activeSiteHost = TrackerAndUrlEngine.normalizeHost(uiState.activeTab.url) ?: "manual",
+                            monitorSyncStatus = monitorSyncStatus,
+                            isBackgroundServiceRunning = isForegroundServiceRunning,
+                            onSaveGuardConfig = browserViewModel::updateSessionGuardConfig,
+                            onToggleLiveMonitorSync = browserViewModel::setLiveCloudMonitorSync,
+                            onToggleBackgroundLiveService = browserViewModel::setBackgroundLiveServiceEnabled,
+                            onOpenCloudSync = { navController.navigate(Routes.ROUTE_CLOUD_SYNC) },
+                            onResetSessionTimer = browserViewModel::resetSessionGuardTimer,
+                            onLogRound = browserViewModel::logCompletedRound,
+                            onDeleteRound = browserViewModel::deleteSessionRoundLog,
+                            onClearRounds = browserViewModel::clearSessionRoundLogs,
                             onNavigateBack = { navController.popBackStack() },
                         )
                     }

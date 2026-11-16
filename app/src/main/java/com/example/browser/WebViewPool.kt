@@ -179,13 +179,30 @@ class WebViewPool(
                 isUserGesture: Boolean,
                 resultMsg: Message?,
             ): Boolean {
+                val pageUrl = tabCurrentUrls[tabId]
+                val adBlockActiveForSite = currentConfig.trackerBlockerEnabled &&
+                    !TrackerAndUrlEngine.isSiteWhitelisted(pageUrl, currentConfig.adBlockWhitelistHosts)
+                val popupShieldActive = currentConfig.popupBlockerEnabled &&
+                    !TrackerAndUrlEngine.isSiteWhitelisted(pageUrl, currentConfig.adBlockWhitelistHosts)
+
                 val hitResult = view?.hitTestResult
                 val hitUrl = hitResult?.extra
                 if (!hitUrl.isNullOrBlank() &&
                     (hitUrl.startsWith("http://", ignoreCase = true) ||
                         hitUrl.startsWith("https://", ignoreCase = true))
                 ) {
+                    val isAdPopup = (popupShieldActive && (!isUserGesture || TrackerAndUrlEngine.isPopupAdUrl(hitUrl, currentConfig.customBlockedDomains))) ||
+                        (adBlockActiveForSite && TrackerAndUrlEngine.isAdOrTrackerRequest(hitUrl, pageUrl, currentConfig.customBlockedDomains, currentConfig.adBlockWhitelistHosts))
+                    if (isAdPopup) {
+                        callbacks.onTrackerBlocked(tabId)
+                        return false
+                    }
                     callbacks.onOpenNewTab(hitUrl)
+                    return false
+                }
+
+                if (popupShieldActive && !isUserGesture) {
+                    callbacks.onTrackerBlocked(tabId)
                     return false
                 }
 
@@ -203,7 +220,13 @@ class WebViewPool(
                                     popupUrl.startsWith("https://", ignoreCase = true))
                             ) {
                                 handled = true
-                                callbacks.onOpenNewTab(popupUrl)
+                                val isAdTarget = (popupShieldActive && TrackerAndUrlEngine.isPopupAdUrl(popupUrl, currentConfig.customBlockedDomains)) ||
+                                    (adBlockActiveForSite && TrackerAndUrlEngine.isAdOrTrackerRequest(popupUrl, pageUrl, currentConfig.customBlockedDomains, currentConfig.adBlockWhitelistHosts))
+                                if (isAdTarget) {
+                                    callbacks.onTrackerBlocked(tabId)
+                                } else {
+                                    callbacks.onOpenNewTab(popupUrl)
+                                }
                             }
                             runCatching { childView?.destroy() }
                             return true
@@ -219,7 +242,13 @@ class WebViewPool(
                                     url.startsWith("https://", ignoreCase = true))
                             ) {
                                 handled = true
-                                callbacks.onOpenNewTab(url)
+                                val isAdTarget = (popupShieldActive && TrackerAndUrlEngine.isPopupAdUrl(url, currentConfig.customBlockedDomains)) ||
+                                    (adBlockActiveForSite && TrackerAndUrlEngine.isAdOrTrackerRequest(url, pageUrl, currentConfig.customBlockedDomains, currentConfig.adBlockWhitelistHosts))
+                                if (isAdTarget) {
+                                    callbacks.onTrackerBlocked(tabId)
+                                } else {
+                                    callbacks.onOpenNewTab(url)
+                                }
                             }
                             runCatching {
                                 childView?.stopLoading()
@@ -323,7 +352,25 @@ class WebViewPool(
                     return true
                 }
 
+                if (!request?.isForMainFrame.let { it == true } &&
+                    currentConfig.popupBlockerEnabled &&
+                    !TrackerAndUrlEngine.isSiteWhitelisted(tabCurrentUrls[tabId], currentConfig.adBlockWhitelistHosts) &&
+                    TrackerAndUrlEngine.isPopupAdUrl(targetUrl, currentConfig.customBlockedDomains)
+                ) {
+                    callbacks.onTrackerBlocked(tabId)
+                    return true
+                }
+
                 if (lower.startsWith("http://") || lower.startsWith("https://")) {
+                    if (request?.isForMainFrame == true &&
+                        currentConfig.popupBlockerEnabled &&
+                        !TrackerAndUrlEngine.isSiteWhitelisted(tabCurrentUrls[tabId], currentConfig.adBlockWhitelistHosts) &&
+                        tabCurrentUrls[tabId] != targetUrl &&
+                        TrackerAndUrlEngine.isPopupAdUrl(targetUrl, currentConfig.customBlockedDomains)
+                    ) {
+                        callbacks.onTrackerBlocked(tabId)
+                        return true
+                    }
                     tabCurrentUrls[tabId] = targetUrl
                     if (view != null) {
                         syncHostJsSetting(tabId, view, currentConfig, targetUrl)
@@ -339,20 +386,38 @@ class WebViewPool(
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
                 val reqUrl = request?.url?.toString() ?: return null
+                val currentPage = tabCurrentUrls[tabId]
                 if (request.isForMainFrame) {
                     tabCurrentUrls[tabId] = reqUrl
                 }
 
-                if (currentConfig.trackerBlockerEnabled && TrackerAndUrlEngine.isTrackerRequest(reqUrl)) {
+                val isMainCustomBlocked = request.isForMainFrame &&
+                    currentConfig.customBlockedDomains.isNotEmpty() &&
+                    TrackerAndUrlEngine.isAdOrTrackerRequest(
+                        url = reqUrl,
+                        pageUrl = null,
+                        customBlockedDomains = currentConfig.customBlockedDomains,
+                        whitelistHosts = emptySet(),
+                    )
+                if (isMainCustomBlocked ||
+                    (!request.isForMainFrame &&
+                        currentConfig.trackerBlockerEnabled &&
+                        TrackerAndUrlEngine.isAdOrTrackerRequest(
+                            url = reqUrl,
+                            pageUrl = currentPage,
+                            customBlockedDomains = currentConfig.customBlockedDomains,
+                            whitelistHosts = currentConfig.adBlockWhitelistHosts,
+                        ))
+                ) {
                     callbacks.onTrackerBlocked(tabId)
-                    return TrackerAndUrlEngine.emptyBlockedResponse()
+                    return TrackerAndUrlEngine.emptyBlockedResponseForUrl(reqUrl)
                 }
 
                 if (isJsDisabledForTab(tabId, currentConfig)) {
                     val path = request.url?.path?.lowercase().orEmpty()
                     if (path.endsWith(".js") || path.endsWith(".mjs")) {
                         callbacks.onScriptBlocked(tabId)
-                        return TrackerAndUrlEngine.emptyBlockedResponse()
+                        return TrackerAndUrlEngine.emptyBlockedResponseForUrl(reqUrl)
                     }
                 }
 
@@ -369,11 +434,14 @@ class WebViewPool(
                 }
                 callbacks.onPageStarted(tabId, safeUrl)
                 if (!isJsDisabledForTab(tabId, currentConfig, safeUrl)) {
+                    val siteAllowed = TrackerAndUrlEngine.isSiteWhitelisted(safeUrl, currentConfig.adBlockWhitelistHosts)
                     val script = PrivacyScripts.buildHardeningScript(
                         seed = (view?.tag as? String) ?: seed,
                         enableWebRtcGuard = currentConfig.webRtcLeakProtectionEnabled,
                         enableFingerprintRandomization = currentConfig.fingerprintRandomizationEnabled,
                         mode = currentConfig.browserMode,
+                        enableCosmeticAdBlock = currentConfig.trackerBlockerEnabled && currentConfig.cosmeticAdBlockEnabled && !siteAllowed,
+                        enablePopupGuard = currentConfig.popupBlockerEnabled && !siteAllowed,
                     )
                     if (script.isNotEmpty()) {
                         view?.evaluateJavascript(script, null)
@@ -387,11 +455,14 @@ class WebViewPool(
                     tabCurrentUrls[tabId] = safeUrl
                 }
                 if (!isJsDisabledForTab(tabId, currentConfig, safeUrl)) {
+                    val siteAllowed = TrackerAndUrlEngine.isSiteWhitelisted(safeUrl, currentConfig.adBlockWhitelistHosts)
                     val script = PrivacyScripts.buildHardeningScript(
                         seed = (view?.tag as? String) ?: seed,
                         enableWebRtcGuard = currentConfig.webRtcLeakProtectionEnabled,
                         enableFingerprintRandomization = currentConfig.fingerprintRandomizationEnabled,
                         mode = currentConfig.browserMode,
+                        enableCosmeticAdBlock = currentConfig.trackerBlockerEnabled && currentConfig.cosmeticAdBlockEnabled && !siteAllowed,
+                        enablePopupGuard = currentConfig.popupBlockerEnabled && !siteAllowed,
                     )
                     if (script.isNotEmpty()) {
                         view?.evaluateJavascript(script, null)

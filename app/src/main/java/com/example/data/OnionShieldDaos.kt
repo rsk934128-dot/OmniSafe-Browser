@@ -92,3 +92,18 @@ interface PinnedAppDao {
     @Query("SELECT COUNT(*) FROM pinned_apps")
     suspend fun count(): Int
 }
+
+@Dao
+interface SessionRoundLogDao {
+    @Query("SELECT * FROM session_round_logs ORDER BY createdAt DESC LIMIT 250")
+    fun observeAll(): Flow<List<SessionRoundLogEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(entry: SessionRoundLogEntity): Long
+
+    @Query("DELETE FROM session_round_logs WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM session_round_logs")
+    suspend fun clearAll()
+}

@@ -9,8 +9,15 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Database(
-    entities = [BookmarkEntity::class, HistoryEntity::class, DownloadEntity::class, VaultEntryEntity::class, PinnedAppEntity::class],
-    version = 3,
+    entities = [
+        BookmarkEntity::class,
+        HistoryEntity::class,
+        DownloadEntity::class,
+        VaultEntryEntity::class,
+        PinnedAppEntity::class,
+        SessionRoundLogEntity::class,
+    ],
+    version = 4,
     exportSchema = false,
 )
 abstract class OnionShieldDatabase : RoomDatabase() {
@@ -19,6 +26,7 @@ abstract class OnionShieldDatabase : RoomDatabase() {
     abstract fun downloadDao(): DownloadDao
     abstract fun vaultDao(): VaultDao
     abstract fun pinnedAppDao(): PinnedAppDao
+    abstract fun sessionRoundLogDao(): SessionRoundLogDao
 
     companion object {
         @Volatile
@@ -59,13 +67,32 @@ abstract class OnionShieldDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `session_round_logs` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `siteHost` TEXT NOT NULL,
+                        `betAmount` REAL NOT NULL,
+                        `crashMultiplier` REAL NOT NULL,
+                        `cashoutMultiplier` REAL,
+                        `netProfit` REAL NOT NULL,
+                        `note` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
         fun getInstance(context: Context): OnionShieldDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     OnionShieldDatabase::class.java,
                     "onionshield_local.db",
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { INSTANCE = it }
             }
         }
     }
@@ -77,6 +104,7 @@ class BrowserLibraryRepository(private val database: OnionShieldDatabase) {
     private val downloadDao = database.downloadDao()
     private val vaultDao = database.vaultDao()
     private val pinnedAppDao = database.pinnedAppDao()
+    private val sessionRoundLogDao = database.sessionRoundLogDao()
 
     val bookmarks: Flow<List<BookmarkEntity>> = bookmarkDao.observeAll()
     val history: Flow<List<HistoryEntity>> = historyDao.observeAll()
@@ -84,6 +112,7 @@ class BrowserLibraryRepository(private val database: OnionShieldDatabase) {
     val vaultEntries: Flow<List<VaultEntryEntity>> = vaultDao.observeAll()
     val vaultCount: Flow<Int> = vaultDao.observeCount()
     val pinnedApps: Flow<List<PinnedAppEntity>> = pinnedAppDao.observeAll()
+    val sessionRoundLogs: Flow<List<SessionRoundLogEntity>> = sessionRoundLogDao.observeAll()
 
     fun observeIsBookmarked(url: String): Flow<Boolean> = bookmarkDao.observeIsBookmarked(url)
 
@@ -172,6 +201,12 @@ class BrowserLibraryRepository(private val database: OnionShieldDatabase) {
     }
 
     suspend fun removePinnedApp(id: Long) = pinnedAppDao.deleteById(id)
+
+    suspend fun insertSessionRoundLog(entry: SessionRoundLogEntity): Long = sessionRoundLogDao.insert(entry)
+
+    suspend fun deleteSessionRoundLog(id: Long) = sessionRoundLogDao.deleteById(id)
+
+    suspend fun clearSessionRoundLogs() = sessionRoundLogDao.clearAll()
 
     private fun UriFallbackTitle(url: String): String {
         return runCatching {

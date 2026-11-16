@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -26,6 +27,10 @@ class PrivacyPreferencesRepository(private val context: Context) {
         val HTTPS_EVERYWHERE = booleanPreferencesKey("https_everywhere")
         val WEBRTC_LEAK_PROTECTION = booleanPreferencesKey("webrtc_leak_protection")
         val TRACKER_BLOCKER = booleanPreferencesKey("tracker_blocker")
+        val POPUP_BLOCKER = booleanPreferencesKey("popup_blocker_enabled")
+        val COSMETIC_AD_BLOCK = booleanPreferencesKey("cosmetic_ad_block_enabled")
+        val AD_BLOCK_WHITELIST_HOSTS = stringSetPreferencesKey("ad_block_whitelist_hosts")
+        val CUSTOM_BLOCKED_DOMAINS = stringSetPreferencesKey("custom_blocked_domains")
         val BLOCK_THIRD_PARTY_COOKIES = booleanPreferencesKey("block_third_party_cookies")
         val SAVE_SURFACE_HISTORY = booleanPreferencesKey("save_surface_history")
         val TOR_PROXY_HOST = stringPreferencesKey("tor_proxy_host")
@@ -42,6 +47,12 @@ class PrivacyPreferencesRepository(private val context: Context) {
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val DISCLAIMER_ACCEPTED = booleanPreferencesKey("disclaimer_accepted")
         val FORCE_DARK_THEME = booleanPreferencesKey("force_dark_theme")
+        val SESSION_GUARD_ENABLED = booleanPreferencesKey("session_guard_enabled")
+        val SESSION_TIME_LIMIT_MIN = intPreferencesKey("session_time_limit_min")
+        val SESSION_BUDGET_LIMIT = doublePreferencesKey("session_budget_limit")
+        val SESSION_CURRENCY_LABEL = stringPreferencesKey("session_currency_label")
+        val LIVE_CLOUD_MONITOR_SYNC = booleanPreferencesKey("live_cloud_monitor_sync")
+        val BACKGROUND_LIVE_SERVICE = booleanPreferencesKey("background_live_service")
     }
 
     val securityConfig: Flow<SecurityConfig> = context.privacyDataStore.data.map { prefs ->
@@ -55,6 +66,10 @@ class PrivacyPreferencesRepository(private val context: Context) {
             httpsEverywhereEnabled = prefs[Keys.HTTPS_EVERYWHERE] ?: true,
             webRtcLeakProtectionEnabled = prefs[Keys.WEBRTC_LEAK_PROTECTION] ?: true,
             trackerBlockerEnabled = prefs[Keys.TRACKER_BLOCKER] ?: true,
+            popupBlockerEnabled = prefs[Keys.POPUP_BLOCKER] ?: true,
+            cosmeticAdBlockEnabled = prefs[Keys.COSMETIC_AD_BLOCK] ?: true,
+            adBlockWhitelistHosts = prefs[Keys.AD_BLOCK_WHITELIST_HOSTS] ?: emptySet(),
+            customBlockedDomains = prefs[Keys.CUSTOM_BLOCKED_DOMAINS] ?: emptySet(),
             blockThirdPartyCookies = prefs[Keys.BLOCK_THIRD_PARTY_COOKIES] ?: true,
             saveSurfaceHistory = prefs[Keys.SAVE_SURFACE_HISTORY] ?: false,
             torProxyHost = prefs[Keys.TOR_PROXY_HOST] ?: "127.0.0.1",
@@ -76,6 +91,12 @@ class PrivacyPreferencesRepository(private val context: Context) {
             } ?: SearchEngine.DUCKDUCKGO,
             disclaimerAccepted = prefs[Keys.DISCLAIMER_ACCEPTED] ?: false,
             forceDarkWebTheme = prefs[Keys.FORCE_DARK_THEME] ?: true,
+            sessionGuardEnabled = prefs[Keys.SESSION_GUARD_ENABLED] ?: false,
+            sessionTimeLimitMinutes = prefs[Keys.SESSION_TIME_LIMIT_MIN] ?: 30,
+            sessionBudgetLimit = prefs[Keys.SESSION_BUDGET_LIMIT] ?: 100.0,
+            sessionCurrencyLabel = prefs[Keys.SESSION_CURRENCY_LABEL] ?: "BDT",
+            liveCloudMonitorSyncEnabled = prefs[Keys.LIVE_CLOUD_MONITOR_SYNC] ?: false,
+            backgroundLiveServiceEnabled = prefs[Keys.BACKGROUND_LIVE_SERVICE] ?: false,
         )
     }
 
@@ -110,6 +131,15 @@ class PrivacyPreferencesRepository(private val context: Context) {
         }
     }
 
+    suspend fun removeTrustedJsHost(host: String) {
+        val clean = host.trim().lowercase()
+        if (clean.isBlank()) return
+        context.privacyDataStore.edit { prefs ->
+            val current = prefs[Keys.TRUSTED_JS_HOSTS] ?: emptySet()
+            prefs[Keys.TRUSTED_JS_HOSTS] = current - clean
+        }
+    }
+
     suspend fun setFingerprintRandomization(enabled: Boolean) {
         context.privacyDataStore.edit { it[Keys.FINGERPRINT_RANDOMIZATION] = enabled }
     }
@@ -124,6 +154,49 @@ class PrivacyPreferencesRepository(private val context: Context) {
 
     suspend fun setTrackerBlocker(enabled: Boolean) {
         context.privacyDataStore.edit { it[Keys.TRACKER_BLOCKER] = enabled }
+    }
+
+    suspend fun setPopupBlocker(enabled: Boolean) {
+        context.privacyDataStore.edit { it[Keys.POPUP_BLOCKER] = enabled }
+    }
+
+    suspend fun setCosmeticAdBlock(enabled: Boolean) {
+        context.privacyDataStore.edit { it[Keys.COSMETIC_AD_BLOCK] = enabled }
+    }
+
+    suspend fun toggleAdBlockWhitelistHost(host: String) {
+        val clean = host.trim().lowercase().removePrefix("www.")
+        if (clean.isBlank()) return
+        context.privacyDataStore.edit { prefs ->
+            val current = prefs[Keys.AD_BLOCK_WHITELIST_HOSTS] ?: emptySet()
+            prefs[Keys.AD_BLOCK_WHITELIST_HOSTS] = if (current.contains(clean)) {
+                current - clean
+            } else {
+                current + clean
+            }
+        }
+    }
+
+    suspend fun addCustomBlockedDomain(domain: String) {
+        val clean = domain.trim().lowercase()
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .substringBefore('/')
+            .substringBefore(':')
+            .removePrefix("www.")
+        if (clean.isBlank() || !clean.contains('.')) return
+        context.privacyDataStore.edit { prefs ->
+            val current = prefs[Keys.CUSTOM_BLOCKED_DOMAINS] ?: emptySet()
+            prefs[Keys.CUSTOM_BLOCKED_DOMAINS] = current + clean
+        }
+    }
+
+    suspend fun removeCustomBlockedDomain(domain: String) {
+        val clean = domain.trim().lowercase()
+        context.privacyDataStore.edit { prefs ->
+            val current = prefs[Keys.CUSTOM_BLOCKED_DOMAINS] ?: emptySet()
+            prefs[Keys.CUSTOM_BLOCKED_DOMAINS] = current - clean
+        }
     }
 
     suspend fun setBlockThirdPartyCookies(enabled: Boolean) {
@@ -175,6 +248,25 @@ class PrivacyPreferencesRepository(private val context: Context) {
         }
     }
 
+    suspend fun applyPrivacyDefaults(maximumPrivacy: Boolean) {
+        context.privacyDataStore.edit { prefs ->
+            prefs[Keys.NO_SCRIPT] = maximumPrivacy
+            prefs[Keys.WEBRTC_LEAK_PROTECTION] = true
+            prefs[Keys.HTTPS_EVERYWHERE] = true
+            prefs[Keys.FINGERPRINT_RANDOMIZATION] = true
+            prefs[Keys.TRACKER_BLOCKER] = true
+            prefs[Keys.POPUP_BLOCKER] = true
+            prefs[Keys.COSMETIC_AD_BLOCK] = true
+            prefs[Keys.BLOCK_THIRD_PARTY_COOKIES] = true
+            prefs[Keys.SAVE_SURFACE_HISTORY] = false
+            prefs[Keys.CIRCUIT_PRIVACY_LEVEL] = if (maximumPrivacy) {
+                CircuitPrivacyLevel.STRICT.name
+            } else {
+                CircuitPrivacyLevel.STANDARD.name
+            }
+        }
+    }
+
     suspend fun saveVaultPinCredentials(saltBase64: String, hashBase64: String) {
         context.privacyDataStore.edit {
             it[Keys.VAULT_PIN_SALT] = saltBase64
@@ -204,5 +296,27 @@ class PrivacyPreferencesRepository(private val context: Context) {
 
     suspend fun setForceDarkTheme(enabled: Boolean) {
         context.privacyDataStore.edit { it[Keys.FORCE_DARK_THEME] = enabled }
+    }
+
+    suspend fun updateSessionGuardConfig(
+        enabled: Boolean,
+        timeLimitMinutes: Int,
+        budgetLimit: Double,
+        currencyLabel: String,
+    ) {
+        context.privacyDataStore.edit {
+            it[Keys.SESSION_GUARD_ENABLED] = enabled
+            it[Keys.SESSION_TIME_LIMIT_MIN] = timeLimitMinutes.coerceIn(5, 600)
+            it[Keys.SESSION_BUDGET_LIMIT] = budgetLimit.coerceAtLeast(1.0)
+            it[Keys.SESSION_CURRENCY_LABEL] = currencyLabel.trim().uppercase().take(6).ifBlank { "BDT" }
+        }
+    }
+
+    suspend fun setLiveCloudMonitorSync(enabled: Boolean) {
+        context.privacyDataStore.edit { it[Keys.LIVE_CLOUD_MONITOR_SYNC] = enabled }
+    }
+
+    suspend fun setBackgroundLiveService(enabled: Boolean) {
+        context.privacyDataStore.edit { it[Keys.BACKGROUND_LIVE_SERVICE] = enabled }
     }
 }

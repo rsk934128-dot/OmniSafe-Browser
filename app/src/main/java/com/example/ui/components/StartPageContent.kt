@@ -131,6 +131,8 @@ fun StartPageContent(
     onToggleHttpsEverywhere: (Boolean) -> Unit,
     onToggleWebRtc: (Boolean) -> Unit,
     onToggleFingerprint: (Boolean) -> Unit,
+    onToggleAdBlocker: (Boolean) -> Unit = {},
+    onTogglePopupBlocker: (Boolean) -> Unit = {},
     onTestTorSocket: () -> Unit,
     onOpenSecuritySettings: () -> Unit,
     modifier: Modifier = Modifier,
@@ -289,7 +291,7 @@ fun StartPageContent(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 TelemetryMetricCard(
-                    label = "Trackers Blocked",
+                    label = "Ads Blocked",
                     value = totalTrackersBlocked.toString(),
                     icon = Icons.Rounded.Block,
                     accent = shieldColors.secureGreen,
@@ -390,6 +392,32 @@ fun StartPageContent(
                         accent = accentColor,
                         testTag = "tile_fingerprint",
                         onClick = { onToggleFingerprint(!config.fingerprintRandomizationEnabled) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    ShieldToggleTile(
+                        title = "Ad Blocker",
+                        subtitle = if (config.trackerBlockerEnabled) "Ads & Pixels Blocked" else "Paused",
+                        enabled = config.trackerBlockerEnabled,
+                        icon = Icons.Rounded.Block,
+                        accent = shieldColors.secureGreen,
+                        testTag = "tile_adblock",
+                        onClick = { onToggleAdBlocker(!config.trackerBlockerEnabled) },
+                        modifier = Modifier.weight(1f),
+                    )
+                    ShieldToggleTile(
+                        title = "Popup Shield",
+                        subtitle = if (config.popupBlockerEnabled) "Popups Blocked" else "Allowed",
+                        enabled = config.popupBlockerEnabled,
+                        icon = Icons.Rounded.Shield,
+                        accent = shieldColors.secureGreen,
+                        testTag = "tile_popup_blocker",
+                        onClick = { onTogglePopupBlocker(!config.popupBlockerEnabled) },
                         modifier = Modifier.weight(1f),
                     )
                 }

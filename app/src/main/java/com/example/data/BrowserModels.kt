@@ -157,6 +157,10 @@ data class SecurityConfig(
     val httpsEverywhereEnabled: Boolean = true,
     val webRtcLeakProtectionEnabled: Boolean = true,
     val trackerBlockerEnabled: Boolean = true,
+    val popupBlockerEnabled: Boolean = true,
+    val cosmeticAdBlockEnabled: Boolean = true,
+    val adBlockWhitelistHosts: Set<String> = emptySet(),
+    val customBlockedDomains: Set<String> = emptySet(),
     val blockThirdPartyCookies: Boolean = true,
     val saveSurfaceHistory: Boolean = false,
     val torProxyHost: String = "127.0.0.1",
@@ -170,6 +174,12 @@ data class SecurityConfig(
     val searchEngine: SearchEngine = SearchEngine.DUCKDUCKGO,
     val disclaimerAccepted: Boolean = false,
     val forceDarkWebTheme: Boolean = true,
+    val sessionGuardEnabled: Boolean = false,
+    val sessionTimeLimitMinutes: Int = 30,
+    val sessionBudgetLimit: Double = 100.0,
+    val sessionCurrencyLabel: String = "BDT",
+    val liveCloudMonitorSyncEnabled: Boolean = false,
+    val backgroundLiveServiceEnabled: Boolean = false,
 ) {
     val torEndpoint: String
         get() = "${torProxyProtocol.scheme}://$torProxyHost:$torProxyPort"

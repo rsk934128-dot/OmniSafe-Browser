@@ -12,23 +12,83 @@ import java.nio.charset.StandardCharsets
 
 object TrackerAndUrlEngine {
 
-    private val blockedTrackerDomains = setOf(
+    private val blockedAdAndTrackerDomains = setOf(
+        // Major ad networks & exchanges
         "doubleclick.net",
         "googlesyndication.com",
         "googleadservices.com",
+        "adservice.google.com",
+        "imasdk.googleapis.com",
+        "amazon-adsystem.com",
+        "adnxs.com",
+        "pubmatic.com",
+        "rubiconproject.com",
+        "openx.net",
+        "casalemedia.com",
+        "indexexchange.com",
+        "33across.com",
+        "sharethrough.com",
+        "triplelift.com",
+        "smartadserver.com",
+        "adform.net",
+        "criteo.com",
+        "criteo.net",
+        "taboola.com",
+        "outbrain.com",
+        "mgid.com",
+        "revcontent.com",
+        "zemanta.com",
+        "media.net",
+        "sovrn.com",
+        "lijit.com",
+        "teads.tv",
+        "spotxchange.com",
+        "advertising.com",
+        "ads.yahoo.com",
+        "adroll.com",
+        "adsrvr.org",
+        "moatads.com",
+        "bidvertiser.com",
+        // Popunder & aggressive mobile ad networks
+        "propellerads.com",
+        "popads.net",
+        "popcash.net",
+        "adsterra.com",
+        "exoclick.com",
+        "juicyads.com",
+        "trafficjunky.com",
+        "hilltopads.net",
+        "richpush.co",
+        "clickadu.com",
+        "admaven.com",
+        // Mobile & video ad SDKs
+        "admob.com",
+        "applovin.com",
+        "unityads.unity3d.com",
+        "ironsrc.com",
+        "vungle.com",
+        "inmobi.com",
+        "chartboost.com",
+        "adcolony.com",
+        // Analytics, telemetry & social tracking pixels
         "google-analytics.com",
         "googletagmanager.com",
-        "adservice.google.com",
         "connect.facebook.net",
         "pixel.facebook.com",
         "an.facebook.com",
         "ads-twitter.com",
         "analytics.twitter.com",
+        "bat.bing.com",
+        "mc.yandex.ru",
+        "analytics.tiktok.com",
+        "ads.tiktok.com",
+        "sc-static.net",
+        "ads.snapchat.com",
+        "ads.pinterest.com",
+        "ads.reddit.com",
+        "alb.reddit.com",
         "scorecardresearch.com",
         "quantserve.com",
-        "taboola.com",
-        "outbrain.com",
-        "criteo.com",
         "hotjar.com",
         "mixpanel.com",
         "segment.io",
@@ -37,29 +97,133 @@ object TrackerAndUrlEngine {
         "appsflyer.com",
         "adjust.com",
         "branch.io",
-        "moatads.com",
-        "pubmatic.com",
-        "rubiconproject.com",
-        "openx.net",
-        "adnxs.com",
-        "amazon-adsystem.com",
         "clarity.ms",
-        "bing.com/bat",
-        "yandex.ru/metrika",
-        "tiktok.com/i18n/pixel",
+        "demdex.net",
+        "krxd.net",
+        "rlcdn.com",
+        "bluekai.com",
+        // Crypto-miners & adware scripts
+        "coinhive.com",
+        "coin-hive.com",
+        "jsecoin.com",
+        "minero.cc",
     )
 
-    fun isTrackerRequest(url: String?): Boolean {
-        if (url.isNullOrBlank()) return false
-        val host = runCatching { Uri.parse(url).host?.lowercase() }.getOrNull() ?: return false
-        return blockedTrackerDomains.any { blocked ->
+    private val blockedHostPathRules = listOf(
+        "bing.com" to "/bat",
+        "yandex.ru" to "/metrika",
+        "tiktok.com" to "/i18n/pixel",
+        "facebook.com" to "/tr",
+        "snapchat.com" to "/scevent",
+    )
+
+    private val thirdPartyAdPathMarkers = listOf(
+        "/pagead/",
+        "/adserver/",
+        "/popunder",
+        "/vast.xml",
+        "/vpaid/",
+        "/prebid",
+        "/ad_banner",
+        "/doubleclick/",
+        "/adsid/",
+    )
+
+    private val popupAdDomains = setOf(
+        "propellerads.com",
+        "popads.net",
+        "popcash.net",
+        "adsterra.com",
+        "exoclick.com",
+        "juicyads.com",
+        "trafficjunky.com",
+        "hilltopads.net",
+        "clickadu.com",
+        "admaven.com",
+        "doubleclick.net",
+        "googleadservices.com",
+        "googlesyndication.com",
+    )
+
+    private fun hostMatchesSet(host: String, domains: Set<String>): Boolean {
+        return domains.any { blocked ->
             host == blocked || host.endsWith(".$blocked")
         }
     }
 
-    fun emptyBlockedResponse(): WebResourceResponse {
+    fun isSiteWhitelisted(pageUrl: String?, whitelistHosts: Set<String>): Boolean {
+        if (whitelistHosts.isEmpty()) return false
+        val pageHost = normalizeHost(pageUrl) ?: return false
+        return whitelistHosts.any { allowed ->
+            pageHost == allowed || pageHost.endsWith(".$allowed")
+        }
+    }
+
+    fun isTrackerRequest(url: String?): Boolean {
+        return isAdOrTrackerRequest(url = url)
+    }
+
+    fun isAdOrTrackerRequest(
+        url: String?,
+        pageUrl: String? = null,
+        customBlockedDomains: Set<String> = emptySet(),
+        whitelistHosts: Set<String> = emptySet(),
+    ): Boolean {
+        if (url.isNullOrBlank()) return false
+        if (isSiteWhitelisted(pageUrl, whitelistHosts)) return false
+
+        val parsed = runCatching { Uri.parse(url) }.getOrNull() ?: return false
+        val rawHost = parsed.host?.lowercase()?.removePrefix("www.") ?: return false
+        val path = parsed.path?.lowercase().orEmpty()
+
+        if (customBlockedDomains.isNotEmpty() && hostMatchesSet(rawHost, customBlockedDomains)) {
+            return true
+        }
+        if (hostMatchesSet(rawHost, blockedAdAndTrackerDomains)) {
+            return true
+        }
+        if (blockedHostPathRules.any { (ruleHost, rulePath) ->
+                (rawHost == ruleHost || rawHost.endsWith(".$ruleHost")) && path.startsWith(rulePath)
+            }
+        ) {
+            return true
+        }
+
+        val pageHost = normalizeHost(pageUrl)
+        if (pageHost != null && rawHost != pageHost && !rawHost.endsWith(".$pageHost") && !pageHost.endsWith(".$rawHost")) {
+            if (thirdPartyAdPathMarkers.any { marker -> path.contains(marker) }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    fun isPopupAdUrl(url: String?, customBlockedDomains: Set<String> = emptySet()): Boolean {
+        if (url.isNullOrBlank()) return false
+        val parsed = runCatching { Uri.parse(url) }.getOrNull() ?: return false
+        val host = parsed.host?.lowercase()?.removePrefix("www.") ?: return false
+        if (hostMatchesSet(host, popupAdDomains) ||
+            (customBlockedDomains.isNotEmpty() && hostMatchesSet(host, customBlockedDomains))
+        ) {
+            return true
+        }
+        val lower = url.lowercase()
+        return lower.contains("popunder") || lower.contains("clicktrack") || lower.contains("/aclk?")
+    }
+
+    fun emptyBlockedResponse(): WebResourceResponse = emptyBlockedResponseForUrl(null)
+
+    fun emptyBlockedResponseForUrl(url: String?): WebResourceResponse {
+        val path = runCatching { Uri.parse(url.orEmpty()).path?.lowercase() }.getOrNull().orEmpty()
+        val mimeType = when {
+            path.endsWith(".js") || path.endsWith(".mjs") -> "application/javascript"
+            path.endsWith(".css") -> "text/css"
+            path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".jpeg") ||
+                path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".svg") -> "image/png"
+            else -> "text/plain"
+        }
         return WebResourceResponse(
-            "text/plain",
+            mimeType,
             "utf-8",
             204,
             "Blocked by OnionShield",

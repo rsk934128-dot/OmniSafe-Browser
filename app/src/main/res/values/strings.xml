@@ -24,4 +24,10 @@
     <string name="cd_bookmark">Toggle bookmark</string>
     <string name="cd_close_tab">Close tab</string>
     <string name="cd_new_tab">New tab</string>
+    <string name="live_monitor_channel_name">Live Browser &amp; Tor Keep-Alive</string>
+    <string name="live_monitor_channel_desc">Keeps OnionShield active, maintains Tor proxy connectivity, and syncs live session stats in the background.</string>
+    <string name="live_monitor_notif_title">OnionShield Live Monitor</string>
+    <string name="live_monitor_notif_tor_title">OnionShield • Tor Keep-Alive Active</string>
+    <string name="live_monitor_stop_action">Stop Live</string>
+    <string name="live_monitor_new_circuit_action">New Circuit</string>
 </resources>

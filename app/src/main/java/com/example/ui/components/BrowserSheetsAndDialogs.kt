@@ -1,5 +1,10 @@
 package com.example.ui.components
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -61,10 +66,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.example.browser.HomeAppShortcutHelper
 import com.example.browser.TrackerAndUrlEngine
 import com.example.data.BrowserMode
@@ -232,12 +239,16 @@ fun TabSwitcherSheet(
 fun QuickShieldSheet(
     tab: BrowserTab,
     config: SecurityConfig,
+    isBackgroundServiceRunning: Boolean = false,
     onToggleNoScript: (Boolean) -> Unit,
     onToggleFingerprint: (Boolean) -> Unit,
     onToggleHttpsEverywhere: (Boolean) -> Unit,
     onToggleWebRtc: (Boolean) -> Unit,
     onToggleTrackerBlocker: (Boolean) -> Unit,
+    onTogglePopupBlocker: (Boolean) -> Unit = {},
+    onToggleSiteAdBlockWhitelist: () -> Unit = {},
     onToggleThirdPartyCookies: (Boolean) -> Unit,
+    onToggleBackgroundLiveService: (Boolean) -> Unit = {},
     onRotateSeed: () -> Unit,
     onOpenCircuitDiagnostics: () -> Unit = {},
     onOpenFullSettings: () -> Unit,
@@ -278,7 +289,7 @@ fun QuickShieldSheet(
                             style = MaterialTheme.typography.titleLarge,
                         )
                         Text(
-                            text = "${tab.blockedTrackersCount} trackers • ${tab.blockedScriptsCount} scripts blocked",
+                            text = "${tab.blockedTrackersCount} ads/trackers • ${tab.blockedScriptsCount} scripts blocked",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -330,13 +341,36 @@ fun QuickShieldSheet(
                 onCheckedChange = onToggleFingerprint,
             )
             ShieldSwitchRow(
-                title = "Tracker & Ad Blocker",
-                subtitle = "Intercept known analytics and cross-site tracking requests",
+                title = "Ad & Tracker Blocker",
+                subtitle = "Block ads, banners, tracking pixels & cosmetic ad boxes",
                 icon = Icons.Rounded.Block,
                 checked = config.trackerBlockerEnabled,
-                accent = accent,
+                accent = shieldColors.secureGreen,
+                modifier = Modifier.testTag("sheet_ad_blocker_switch"),
                 onCheckedChange = onToggleTrackerBlocker,
             )
+            ShieldSwitchRow(
+                title = "Popup & Redirect Shield",
+                subtitle = "Block auto-popups, popunders & ad redirects",
+                icon = Icons.Rounded.Shield,
+                checked = config.popupBlockerEnabled,
+                accent = shieldColors.secureGreen,
+                modifier = Modifier.testTag("sheet_popup_blocker_switch"),
+                onCheckedChange = onTogglePopupBlocker,
+            )
+            val currentHost = TrackerAndUrlEngine.normalizeHost(tab.url)
+            if (!tab.isStartPage && currentHost != null) {
+                val isSiteWhitelisted = TrackerAndUrlEngine.isSiteWhitelisted(tab.url, config.adBlockWhitelistHosts)
+                ShieldSwitchRow(
+                    title = "Ad Block for $currentHost",
+                    subtitle = if (isSiteWhitelisted) "Ads allowed on this site (Paused)" else "Active — blocking ads on this site",
+                    icon = Icons.Rounded.Block,
+                    checked = !isSiteWhitelisted,
+                    accent = shieldColors.secureGreen,
+                    modifier = Modifier.testTag("site_adblock_whitelist_switch"),
+                    onCheckedChange = { onToggleSiteAdBlockWhitelist() },
+                )
+            }
             ShieldSwitchRow(
                 title = "Block 3rd-Party Cookies",
                 subtitle = "Isolate site storage and reject cross-origin tracking cookies",
@@ -344,6 +378,41 @@ fun QuickShieldSheet(
                 checked = config.blockThirdPartyCookies,
                 accent = accent,
                 onCheckedChange = onToggleThirdPartyCookies,
+            )
+
+            val sheetContext = LocalContext.current
+            val permissionLauncher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.RequestPermission(),
+            ) { granted ->
+                if (granted) {
+                    onToggleBackgroundLiveService(true)
+                }
+            }
+            ShieldSwitchRow(
+                title = "Keep Browser & Tor Live",
+                subtitle = if (isBackgroundServiceRunning) {
+                    "Foreground Service running with persistent notification"
+                } else {
+                    "Maintain Tor & session activity after leaving the app"
+                },
+                icon = Icons.Rounded.Security,
+                checked = isBackgroundServiceRunning || config.backgroundLiveServiceEnabled,
+                accent = shieldColors.secureGreen,
+                modifier = Modifier.testTag("sheet_background_live_switch"),
+                onCheckedChange = { wantEnable ->
+                    if (!wantEnable) {
+                        onToggleBackgroundLiveService(false)
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(
+                            sheetContext,
+                            Manifest.permission.POST_NOTIFICATIONS,
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    } else {
+                        onToggleBackgroundLiveService(true)
+                    }
+                },
             )
 
             OutlinedButton(
@@ -379,10 +448,11 @@ private fun ShieldSwitchRow(
     icon: ImageVector,
     checked: Boolean,
     accent: Color,
+    modifier: Modifier = Modifier,
     onCheckedChange: (Boolean) -> Unit,
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.small)
             .clickable { onCheckedChange(!checked) }

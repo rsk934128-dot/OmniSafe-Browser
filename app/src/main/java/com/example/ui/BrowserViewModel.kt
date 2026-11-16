@@ -1,18 +1,28 @@
 package com.example.ui
 
+import android.Manifest
 import android.app.Application
 import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.view.View
 import android.webkit.URLUtil
 import android.webkit.WebChromeClient
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.browser.HomeAppShortcutHelper
+import com.example.browser.LiveMonitorForegroundService
+import com.example.browser.LiveSessionRuntime
 import com.example.browser.PrivacyScripts
+import com.example.browser.SessionGuardEngine
+import com.example.browser.SessionGuardStats
+import com.example.browser.SessionMonitorSyncService
+import com.example.browser.SessionMonitorSyncStatus
 import com.example.browser.TorCircuitService
 import com.example.browser.TorProxyController
 import com.example.browser.TrackerAndUrlEngine
@@ -36,19 +46,26 @@ import com.example.data.PrivacyPreferencesRepository
 import com.example.data.ProxyProtocol
 import com.example.data.SearchEngine
 import com.example.data.SecurityConfig
+import com.example.data.SessionRoundLogEntity
 import com.example.data.TorCircuitDiagnostic
 import com.example.data.TorProxyState
 import com.example.data.VaultEntryEntity
 import com.example.data.VaultEntryType
+import com.example.data.repository.SessionMonitorFirestoreRepository
 import com.example.security.VaultCryptoManager
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
 import java.util.UUID
 import javax.crypto.SecretKey
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -99,6 +116,42 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     val pinnedApps: StateFlow<List<PinnedAppEntity>> = libraryRepo.pinnedApps
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val sessionRoundLogs: StateFlow<List<SessionRoundLogEntity>> = libraryRepo.sessionRoundLogs
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val isForegroundServiceRunning: StateFlow<Boolean> = LiveSessionRuntime.isForegroundServiceRunning
+
+    val sessionGuardStats: StateFlow<SessionGuardStats> = combine(
+        sessionRoundLogs,
+        _uiState,
+        LiveSessionRuntime.elapsedMinutes,
+    ) { rounds, state, elapsed ->
+        val cfg = state.securityConfig
+        SessionGuardEngine.computeSessionStats(
+            rounds = rounds,
+            guardEnabled = cfg.sessionGuardEnabled,
+            elapsedMinutes = elapsed,
+            timeLimitMinutes = cfg.sessionTimeLimitMinutes,
+            budgetLimit = cfg.sessionBudgetLimit,
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SessionGuardStats())
+
+    private val sessionMonitorSyncService: SessionMonitorSyncService? = runCatching {
+        SessionMonitorSyncService(
+            repository = SessionMonitorFirestoreRepository(application),
+            auth = Firebase.auth,
+            scope = viewModelScope,
+        )
+    }.getOrNull()
+
+    val monitorSyncStatus: StateFlow<SessionMonitorSyncStatus> = combine(
+        LiveSessionRuntime.isForegroundServiceRunning,
+        LiveSessionRuntime.foregroundSyncStatus,
+        sessionMonitorSyncService?.syncStatus ?: MutableStateFlow(SessionMonitorSyncStatus.Disabled),
+    ) { serviceRunning, serviceStatus, vmStatus ->
+        if (serviceRunning) serviceStatus else vmStatus
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SessionMonitorSyncStatus.Disabled)
+
     private val _fullscreenCustomView = MutableStateFlow<View?>(null)
     val fullscreenCustomView: StateFlow<View?> = _fullscreenCustomView.asStateFlow()
     private var customVideoCallback: WebChromeClient.CustomViewCallback? = null
@@ -109,6 +162,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     private var lastAppliedProxyKey: String? = null
+    private var autoStartedBackgroundService = false
     private var latestEncryptedVaultEntities: List<VaultEntryEntity> = emptyList()
     private var unlockedVaultKey: SecretKey? = null
 
@@ -131,6 +185,39 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 if (proxyKey != lastAppliedProxyKey) {
                     lastAppliedProxyKey = proxyKey
                     applyProxyForMode(config)
+                }
+
+                if (!autoStartedBackgroundService) {
+                    autoStartedBackgroundService = true
+                    if (config.backgroundLiveServiceEnabled &&
+                        !LiveSessionRuntime.isForegroundServiceRunning.value &&
+                        hasNotificationPermission()
+                    ) {
+                        LiveMonitorForegroundService.start(getApplication())
+                    }
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            _uiState.map { it.activeTab.url }
+                .distinctUntilChanged()
+                .collectLatest { url ->
+                    LiveSessionRuntime.updateActiveSiteHost(url)
+                }
+        }
+
+        viewModelScope.launch {
+            combine(
+                LiveSessionRuntime.isForegroundServiceRunning,
+                LiveSessionRuntime.liveTorProxyState,
+            ) { running, torState ->
+                running to torState
+            }.collectLatest { (running, torState) ->
+                if (running && _uiState.value.securityConfig.browserMode == BrowserMode.TOR_ONION &&
+                    torState !is TorProxyState.Inactive
+                ) {
+                    _uiState.update { it.copy(torProxyState = torState) }
                 }
             }
         }
@@ -157,6 +244,21 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 _uiState.update { it.copy(wrappedVaultDek = envelope) }
             }
         }
+
+        viewModelScope.launch {
+            while (true) {
+                LiveSessionRuntime.refreshElapsed()
+                delay(15_000L)
+            }
+        }
+
+        sessionMonitorSyncService?.startObserving(
+            siteHostFlow = LiveSessionRuntime.activeSiteHost,
+            configFlow = _uiState.map { it.securityConfig }.distinctUntilChanged(),
+            statsFlow = sessionGuardStats,
+            roundsFlow = sessionRoundLogs,
+            isPausedFlow = LiveSessionRuntime.isForegroundServiceRunning,
+        )
     }
 
     private suspend fun applyProxyForMode(config: SecurityConfig) {
@@ -903,6 +1005,30 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun removeTrustedJsHost(host: String) = viewModelScope.launch {
+        prefsRepo.removeTrustedJsHost(host)
+        _uiState.value.activeTab.let { tab ->
+            if (!tab.isStartPage) webViewPool.getWebView(tab.id)?.reload()
+        }
+        _uiState.update { it.copy(statusBannerMessage = "Removed JavaScript exception for $host") }
+    }
+
+    fun applyPrivacyPreset(maximumPrivacy: Boolean) = viewModelScope.launch {
+        prefsRepo.applyPrivacyDefaults(maximumPrivacy)
+        _uiState.value.activeTab.let { tab ->
+            if (!tab.isStartPage) webViewPool.getWebView(tab.id)?.reload()
+        }
+        _uiState.update {
+            it.copy(
+                statusBannerMessage = if (maximumPrivacy) {
+                    "Maximum Privacy active: JavaScript blocked, WebRTC & HTTPS-Only locked ON."
+                } else {
+                    "Recommended privacy defaults restored."
+                },
+            )
+        }
+    }
+
     fun setFingerprintRandomization(enabled: Boolean) = viewModelScope.launch {
         prefsRepo.setFingerprintRandomization(enabled)
     }
@@ -913,10 +1039,77 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun setWebRtcLeakProtection(enabled: Boolean) = viewModelScope.launch {
         prefsRepo.setWebRtcLeakProtection(enabled)
+        _uiState.value.activeTab.let { tab ->
+            if (!tab.isStartPage) webViewPool.getWebView(tab.id)?.reload()
+        }
     }
 
     fun setTrackerBlocker(enabled: Boolean) = viewModelScope.launch {
         prefsRepo.setTrackerBlocker(enabled)
+        _uiState.value.activeTab.let { tab ->
+            if (!tab.isStartPage) webViewPool.getWebView(tab.id)?.reload()
+        }
+        _uiState.update {
+            it.copy(
+                statusBannerMessage = if (enabled) {
+                    "Ad & Tracker Blocker enabled."
+                } else {
+                    "Ad & Tracker Blocker paused."
+                },
+            )
+        }
+    }
+
+    fun setPopupBlocker(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setPopupBlocker(enabled)
+    }
+
+    fun setCosmeticAdBlock(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setCosmeticAdBlock(enabled)
+        _uiState.value.activeTab.let { tab ->
+            if (!tab.isStartPage) webViewPool.getWebView(tab.id)?.reload()
+        }
+    }
+
+    fun toggleAdBlockWhitelistCurrentSite() = viewModelScope.launch {
+        val tab = _uiState.value.activeTab
+        if (tab.isStartPage) return@launch
+        val host = TrackerAndUrlEngine.normalizeHost(tab.url) ?: return@launch
+        val currentlyWhitelisted = _uiState.value.securityConfig.adBlockWhitelistHosts.contains(host)
+        prefsRepo.toggleAdBlockWhitelistHost(host)
+        _uiState.update {
+            it.copy(
+                statusBannerMessage = if (currentlyWhitelisted) {
+                    "Ad Blocker re-enabled on $host"
+                } else {
+                    "Ad Blocker paused on $host"
+                },
+            )
+        }
+        webViewPool.getWebView(tab.id)?.reload()
+    }
+
+    fun toggleAdBlockWhitelistHost(host: String) = viewModelScope.launch {
+        prefsRepo.toggleAdBlockWhitelistHost(host)
+    }
+
+    fun addCustomBlockedDomain(domain: String) = viewModelScope.launch {
+        val clean = domain.trim().lowercase()
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .substringBefore('/')
+            .substringBefore(':')
+            .removePrefix("www.")
+        if (clean.isBlank() || !clean.contains('.')) {
+            _uiState.update { it.copy(statusBannerMessage = "Enter a valid domain like ads.example.com") }
+            return@launch
+        }
+        prefsRepo.addCustomBlockedDomain(clean)
+        _uiState.update { it.copy(statusBannerMessage = "Added $clean to Ad Blocklist") }
+    }
+
+    fun removeCustomBlockedDomain(domain: String) = viewModelScope.launch {
+        prefsRepo.removeCustomBlockedDomain(domain)
     }
 
     fun setBlockThirdPartyCookies(enabled: Boolean) = viewModelScope.launch {
@@ -958,6 +1151,126 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun openDisclaimer() {
         _uiState.update { it.copy(showDisclaimerDialog = true) }
+    }
+
+    fun updateSessionGuardConfig(
+        enabled: Boolean,
+        timeLimitMinutes: Int,
+        budgetLimit: Double,
+        currencyLabel: String,
+    ) = viewModelScope.launch {
+        prefsRepo.updateSessionGuardConfig(
+            enabled = enabled,
+            timeLimitMinutes = timeLimitMinutes,
+            budgetLimit = budgetLimit,
+            currencyLabel = currencyLabel,
+        )
+        _uiState.update {
+            it.copy(
+                statusBannerMessage = if (enabled) {
+                    "Session Guard active (${timeLimitMinutes}m • $budgetLimit $currencyLabel limit)."
+                } else {
+                    "Session Guard paused."
+                },
+            )
+        }
+    }
+
+    fun resetSessionGuardTimer() {
+        LiveSessionRuntime.resetTimer()
+        _uiState.update { it.copy(statusBannerMessage = "Session timer reset to 0 min.") }
+    }
+
+    fun logCompletedRound(
+        siteHost: String,
+        betAmount: Double,
+        crashMultiplier: Double,
+        cashoutMultiplier: Double?,
+        note: String,
+    ) = viewModelScope.launch {
+        val cleanBet = betAmount.coerceAtLeast(0.0)
+        val cleanCrash = crashMultiplier.coerceAtLeast(1.0)
+        val validCashout = cashoutMultiplier?.takeIf { it >= 1.0 && it <= cleanCrash }
+        val payout = if (validCashout != null) cleanBet * validCashout else 0.0
+        val netProfit = payout - cleanBet
+        val cleanHost = siteHost.trim().ifBlank {
+            TrackerAndUrlEngine.normalizeHost(_uiState.value.activeTab.url) ?: "manual"
+        }
+
+        libraryRepo.insertSessionRoundLog(
+            SessionRoundLogEntity(
+                siteHost = cleanHost,
+                betAmount = cleanBet,
+                crashMultiplier = cleanCrash,
+                cashoutMultiplier = validCashout,
+                netProfit = netProfit,
+                note = note.trim(),
+            ),
+        )
+    }
+
+    fun deleteSessionRoundLog(id: Long) = viewModelScope.launch {
+        val target = sessionRoundLogs.value.firstOrNull { it.id == id }
+        libraryRepo.deleteSessionRoundLog(id)
+        if (target != null) {
+            sessionMonitorSyncService?.deleteRemoteRoundForLocal(target)
+        }
+    }
+
+    fun clearSessionRoundLogs() = viewModelScope.launch {
+        libraryRepo.clearSessionRoundLogs()
+    }
+
+    fun setLiveCloudMonitorSync(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setLiveCloudMonitorSync(enabled)
+        _uiState.update {
+            it.copy(
+                statusBannerMessage = if (enabled) {
+                    "Live Remote Monitor Sync enabled (requires Google Sign-In in Cloud Sync)."
+                } else {
+                    "Live Remote Monitor Sync paused."
+                },
+            )
+        }
+    }
+
+    private fun hasNotificationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                getApplication(),
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    fun setBackgroundLiveServiceEnabled(enabled: Boolean) = viewModelScope.launch {
+        val app = getApplication<Application>()
+        if (enabled) {
+            if (!hasNotificationPermission()) {
+                prefsRepo.setBackgroundLiveService(false)
+                _uiState.update {
+                    it.copy(
+                        statusBannerMessage = "Notification permission is required to keep the live background service active.",
+                    )
+                }
+                return@launch
+            }
+            prefsRepo.setBackgroundLiveService(true)
+            LiveMonitorForegroundService.start(app)
+            _uiState.update {
+                it.copy(
+                    statusBannerMessage = "Foreground Service active — browser & Tor keep-alive running in background.",
+                )
+            }
+        } else {
+            prefsRepo.setBackgroundLiveService(false)
+            LiveMonitorForegroundService.stop(app)
+            _uiState.update {
+                it.copy(statusBannerMessage = "Background live monitor stopped.")
+            }
+        }
     }
 
     // WebViewEventCallbacks
@@ -1095,6 +1408,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     override fun onCleared() {
         unlockedVaultKey = null
+        sessionMonitorSyncService?.stop()
         exitFullscreenVideo()
         webViewPool.shredAllSessions()
         super.onCleared()

@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.AddToHomeScreen
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.CodeOff
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Download
@@ -48,6 +49,7 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -88,6 +90,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.browser.GuardAlertLevel
 import com.example.browser.TorProxyController
 import com.example.browser.TrackerAndUrlEngine
 import com.example.data.ABOUT_START_URL
@@ -117,6 +120,8 @@ fun BrowserScreen(
     onOpenLibrary: () -> Unit,
     onOpenDownloads: () -> Unit,
     onOpenVault: () -> Unit = {},
+    onOpenCloudSync: () -> Unit = {},
+    onOpenSessionGuard: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -124,6 +129,8 @@ fun BrowserScreen(
     val shieldColors = LocalShieldColors.current
 
     val pinnedApps by viewModel.pinnedApps.collectAsStateWithLifecycle()
+    val sessionGuardStats by viewModel.sessionGuardStats.collectAsStateWithLifecycle()
+    val isForegroundServiceRunning by viewModel.isForegroundServiceRunning.collectAsStateWithLifecycle()
     val fullscreenCustomView by viewModel.fullscreenCustomView.collectAsStateWithLifecycle()
 
     var showTabSwitcher by remember { mutableStateOf(false) }
@@ -181,8 +188,39 @@ fun BrowserScreen(
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
+                        if (isForegroundServiceRunning) {
+                            Surface(
+                                shape = CircleShape,
+                                color = shieldColors.secureGreen.copy(alpha = 0.16f),
+                                border = BorderStroke(1.dp, shieldColors.secureGreen.copy(alpha = 0.6f)),
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .clickable { onOpenSessionGuard() }
+                                    .testTag("live_service_indicator_chip"),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(shieldColors.secureGreen),
+                                    )
+                                    Text(
+                                        text = if (isTorMode) "LIVE TOR" else "LIVE",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = shieldColors.secureGreen,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                }
+                            }
+                        }
+
                         ProxyStatusChip(
                             mode = uiState.securityConfig.browserMode,
                             proxyState = uiState.torProxyState,
@@ -521,6 +559,30 @@ fun BrowserScreen(
                                     },
                                 )
                                 DropdownMenuItem(
+                                    text = { Text("Cloud Sync (Firebase)") },
+                                    leadingIcon = { Icon(Icons.Rounded.CloudSync, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        onOpenCloudSync()
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            if (isForegroundServiceRunning) {
+                                                "Session Guard & Stats (LIVE)"
+                                            } else {
+                                                "Session Guard & Stats"
+                                            },
+                                        )
+                                    },
+                                    leadingIcon = { Icon(Icons.Rounded.Timer, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        onOpenSessionGuard()
+                                    },
+                                )
+                                DropdownMenuItem(
                                     text = { Text("Downloads Manager") },
                                     leadingIcon = { Icon(Icons.Rounded.Download, contentDescription = null) },
                                     onClick = {
@@ -529,8 +591,9 @@ fun BrowserScreen(
                                     },
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("Security & Proxy Setup") },
+                                    text = { Text("Privacy & Security Settings") },
                                     leadingIcon = { Icon(Icons.Rounded.Settings, contentDescription = null) },
+                                    modifier = Modifier.testTag("menu_privacy_settings"),
                                     onClick = {
                                         showOverflowMenu = false
                                         onOpenSecuritySettings()
@@ -577,6 +640,8 @@ fun BrowserScreen(
                     onToggleHttpsEverywhere = viewModel::setHttpsEverywhere,
                     onToggleWebRtc = viewModel::setWebRtcLeakProtection,
                     onToggleFingerprint = viewModel::setFingerprintRandomization,
+                    onToggleAdBlocker = viewModel::setTrackerBlocker,
+                    onTogglePopupBlocker = viewModel::setPopupBlocker,
                     onTestTorSocket = viewModel::testTorProxyConnection,
                     onOpenSecuritySettings = onOpenSecuritySettings,
                 )
@@ -625,6 +690,58 @@ fun BrowserScreen(
                                         fontWeight = FontWeight.Bold,
                                         color = shieldColors.warningAmber,
                                     )
+                                }
+                            }
+                        }
+                    }
+
+                    if (uiState.securityConfig.sessionGuardEnabled &&
+                        sessionGuardStats.overallAlertLevel >= GuardAlertLevel.APPROACHING_LIMIT
+                    ) {
+                        val isLimitReached = sessionGuardStats.overallAlertLevel == GuardAlertLevel.LIMIT_REACHED
+                        Surface(
+                            color = if (isLimitReached) {
+                                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.85f)
+                            } else {
+                                shieldColors.warningAmberContainer.copy(alpha = 0.85f)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Timer,
+                                        contentDescription = "Session guard alert",
+                                        tint = if (isLimitReached) MaterialTheme.colorScheme.error else shieldColors.warningAmber,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Text(
+                                        text = if (isLimitReached) {
+                                            "Session Guard limit reached (${sessionGuardStats.elapsedMinutes}m). Take a break."
+                                        } else {
+                                            "Session Guard: approaching time/budget limit (${sessionGuardStats.elapsedMinutes}m)."
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                TextButton(
+                                    onClick = onOpenSessionGuard,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                ) {
+                                    Text("Stats", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
@@ -730,12 +847,16 @@ fun BrowserScreen(
         QuickShieldSheet(
             tab = activeTab,
             config = uiState.securityConfig,
+            isBackgroundServiceRunning = isForegroundServiceRunning,
             onToggleNoScript = viewModel::setNoScript,
             onToggleFingerprint = viewModel::setFingerprintRandomization,
             onToggleHttpsEverywhere = viewModel::setHttpsEverywhere,
             onToggleWebRtc = viewModel::setWebRtcLeakProtection,
             onToggleTrackerBlocker = viewModel::setTrackerBlocker,
+            onTogglePopupBlocker = viewModel::setPopupBlocker,
+            onToggleSiteAdBlockWhitelist = viewModel::toggleAdBlockWhitelistCurrentSite,
             onToggleThirdPartyCookies = viewModel::setBlockThirdPartyCookies,
+            onToggleBackgroundLiveService = viewModel::setBackgroundLiveServiceEnabled,
             onRotateSeed = viewModel::regenerateFingerprintSeed,
             onOpenCircuitDiagnostics = {
                 showQuickShields = false

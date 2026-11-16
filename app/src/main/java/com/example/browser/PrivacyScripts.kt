@@ -61,8 +61,12 @@ object PrivacyScripts {
         enableWebRtcGuard: Boolean,
         enableFingerprintRandomization: Boolean,
         mode: BrowserMode = BrowserMode.SURFACE,
+        enableCosmeticAdBlock: Boolean = false,
+        enablePopupGuard: Boolean = false,
     ): String {
-        if (!enableWebRtcGuard && !enableFingerprintRandomization) return ""
+        if (!enableWebRtcGuard && !enableFingerprintRandomization && !enableCosmeticAdBlock && !enablePopupGuard) {
+            return ""
+        }
         val profile = profileForSeed(seed, mode)
         val numericNoise = ((seed.hashCode() and 0xFF) % 5) + 1
         val cores = listOf(2, 4, 8)[(seed.hashCode() and 0x7FFFFFFF) % 3]
@@ -122,6 +126,64 @@ object PrivacyScripts {
                         if (param === 37446) return 'OnionShield Virtual GPU ($seed)';
                         return origGetParam.apply(this, arguments);
                       };
+                    } catch (e) {}
+                    """.trimIndent()
+                )
+            }
+            if (enableCosmeticAdBlock) {
+                append(
+                    """
+                    try {
+                      if (!document.getElementById('os-cosmetic-adblock')) {
+                        const style = document.createElement('style');
+                        style.id = 'os-cosmetic-adblock';
+                        style.textContent = `
+                          ins.adsbygoogle,
+                          .adsbygoogle,
+                          [id^="google_ads_iframe"],
+                          [id^="div-gpt-ad"],
+                          [data-ad-slot],
+                          [data-ad-client],
+                          .ad-banner,
+                          .ad-container,
+                          .ad-wrapper,
+                          .sponsored-ad,
+                          #taboola-below-article-thumbnails,
+                          .taboola-container,
+                          .OUTBRAIN,
+                          [data-widget-host="outbrain"],
+                          iframe[src*="doubleclick.net"],
+                          iframe[src*="googlesyndication.com"],
+                          iframe[src*="adnxs.com"],
+                          iframe[src*="propellerads"],
+                          iframe[src*="exoclick"] {
+                            display: none !important;
+                            visibility: hidden !important;
+                            height: 0 !important;
+                            min-height: 0 !important;
+                          }
+                        `;
+                        (document.head || document.documentElement).appendChild(style);
+                      }
+                    } catch (e) {}
+                    """.trimIndent()
+                )
+            }
+            if (enablePopupGuard) {
+                append(
+                    """
+                    try {
+                      if (!window.__osPopupGuardInstalled) {
+                        window.__osPopupGuardInstalled = true;
+                        const origOpen = window.open;
+                        const adHostRe = /(doubleclick\.net|googlesyndication|googleadservices|popads\.net|popcash\.net|propellerads|adsterra|exoclick|juicyads|trafficjunky|clickadu|admaven|hilltopads)/i;
+                        window.open = function(targetUrl) {
+                          if (!targetUrl || String(targetUrl) === 'about:blank' || adHostRe.test(String(targetUrl))) {
+                            return null;
+                          }
+                          return origOpen.apply(this, arguments);
+                        };
+                      }
                     } catch (e) {}
                     """.trimIndent()
                 )

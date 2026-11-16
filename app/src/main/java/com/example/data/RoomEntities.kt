@@ -54,3 +54,15 @@ data class PinnedAppEntity(
     val isOnion: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
 )
+
+@Entity(tableName = "session_round_logs")
+data class SessionRoundLogEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val siteHost: String,
+    val betAmount: Double,
+    val crashMultiplier: Double,
+    val cashoutMultiplier: Double? = null,
+    val netProfit: Double,
+    val note: String = "",
+    val createdAt: Long = System.currentTimeMillis(),
+)

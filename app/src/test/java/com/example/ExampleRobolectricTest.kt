@@ -1,7 +1,11 @@
 package com.example
 
+import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
+import com.example.browser.LiveMonitorForegroundService
+import com.example.browser.LiveSessionRuntime
 import com.example.browser.PrivacyScripts
 import com.example.browser.TorCircuitService
 import com.example.browser.TrackerAndUrlEngine
@@ -12,13 +16,17 @@ import com.example.data.CircuitPrivacyLevel
 import com.example.data.OnionAddressStatus
 import com.example.data.SearchEngine
 import com.example.security.VaultCryptoManager
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -280,5 +288,240 @@ class ExampleRobolectricTest {
                 mimeType = "application/pdf",
             ),
         )
+    }
+
+    @Test
+    fun `session guard engine computes net loss alert and bucket distribution accurately`() {
+        val rounds = listOf(
+            com.example.data.SessionRoundLogEntity(
+                siteHost = "example.org",
+                betAmount = 50.0,
+                crashMultiplier = 1.20,
+                cashoutMultiplier = null,
+                netProfit = -50.0,
+            ),
+            com.example.data.SessionRoundLogEntity(
+                siteHost = "example.org",
+                betAmount = 40.0,
+                crashMultiplier = 5.71,
+                cashoutMultiplier = 2.0,
+                netProfit = 40.0,
+            ),
+            com.example.data.SessionRoundLogEntity(
+                siteHost = "example.org",
+                betAmount = 100.0,
+                crashMultiplier = 12.50,
+                cashoutMultiplier = null,
+                netProfit = -100.0,
+            ),
+        )
+        val stats = com.example.browser.SessionGuardEngine.computeSessionStats(
+            rounds = rounds,
+            guardEnabled = true,
+            elapsedMinutes = 15L,
+            timeLimitMinutes = 30,
+            budgetLimit = 100.0,
+        )
+        assertEquals(3, stats.totalRounds)
+        assertEquals(1, stats.winsCount)
+        assertEquals(-110.0, stats.netProfit, 0.001)
+        assertEquals(12.50, stats.maxCrashMultiplier, 0.001)
+        assertEquals(com.example.browser.GuardAlertLevel.SAFE, stats.timeAlertLevel)
+        assertEquals(com.example.browser.GuardAlertLevel.LIMIT_REACHED, stats.budgetAlertLevel)
+        assertEquals(com.example.browser.GuardAlertLevel.LIMIT_REACHED, stats.overallAlertLevel)
+        assertEquals(1, stats.buckets[0].count) // 1.0–1.49x
+        assertEquals(1, stats.buckets[2].count) // 3.0–9.99x
+        assertEquals(1, stats.buckets[3].count) // 10x+
+    }
+
+    @Test
+    fun `provably fair sha256 and hmac verifier checks post-round commitment`() {
+        val serverSeed = "demo_revealed_server_seed_2026"
+        val expectedHash = com.example.browser.SessionGuardEngine.sha256Hex(serverSeed)
+        val validResult = com.example.browser.SessionGuardEngine.verifyCrashFairness(
+            serverSeed = serverSeed,
+            clientSeed = "client_seed_abc",
+            nonce = "42",
+            expectedServerSeedHash = expectedHash,
+        )
+        assertTrue(validResult.isValidInput)
+        assertEquals(true, validResult.commitmentMatched)
+        assertTrue(validResult.derivedMultiplier >= 1.00)
+
+        val tamperedResult = com.example.browser.SessionGuardEngine.verifyCrashFairness(
+            serverSeed = serverSeed,
+            clientSeed = "client_seed_abc",
+            nonce = "42",
+            expectedServerSeedHash = "0000000000000000",
+        )
+        assertEquals(false, tamperedResult.commitmentMatched)
+    }
+
+    @Test
+    fun `live session runtime redacts onion hosts and refreshes elapsed timer`() {
+        val now = 1_700_000_000_000L
+        LiveSessionRuntime.resetTimer(now)
+        assertEquals(0L, LiveSessionRuntime.elapsedMinutes.value)
+
+        val elapsed = LiveSessionRuntime.refreshElapsed(now + 12 * 60_000L)
+        assertEquals(12L, elapsed)
+        assertEquals(12L, LiveSessionRuntime.elapsedMinutes.value)
+
+        LiveSessionRuntime.updateActiveSiteHost("https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/search")
+        assertEquals("onion_redacted", LiveSessionRuntime.activeSiteHost.value)
+
+        LiveSessionRuntime.updateActiveSiteHost("https://example.org/app")
+        assertEquals("example.org", LiveSessionRuntime.activeSiteHost.value)
+    }
+
+    @Test
+    fun `foreground live monitor service enters foreground and stops cleanly on ACTION_STOP`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val startIntent = Intent(context, LiveMonitorForegroundService::class.java)
+            .setAction(LiveMonitorForegroundService.ACTION_START)
+        val controller = Robolectric.buildService(LiveMonitorForegroundService::class.java, startIntent)
+            .create()
+            .startCommand(0, 1)
+        val service = controller.get()
+
+        assertTrue(LiveSessionRuntime.isForegroundServiceRunning.value)
+        val shadowService = Shadows.shadowOf(service)
+        assertNotNull(shadowService.lastForegroundNotification)
+        assertEquals(LiveMonitorForegroundService.NOTIFICATION_ID, shadowService.lastForegroundNotificationId)
+
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channel = notificationManager.getNotificationChannel(LiveMonitorForegroundService.CHANNEL_ID)
+        assertNotNull(channel)
+
+        val stopIntent = Intent(context, LiveMonitorForegroundService::class.java)
+            .setAction(LiveMonitorForegroundService.ACTION_STOP)
+        service.onStartCommand(stopIntent, 0, 2)
+
+        assertFalse(LiveSessionRuntime.isForegroundServiceRunning.value)
+        assertTrue(shadowService.isStoppedBySelf)
+        controller.destroy()
+    }
+
+    @Test
+    fun `foreground live monitor notification includes Tor connectivity status and New Circuit action in Tor mode`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val startIntent = Intent(context, LiveMonitorForegroundService::class.java)
+            .setAction(LiveMonitorForegroundService.ACTION_START)
+        val controller = Robolectric.buildService(LiveMonitorForegroundService::class.java, startIntent)
+            .create()
+        val service = controller.get()
+
+        val torConfig = com.example.data.SecurityConfig(
+            browserMode = BrowserMode.TOR_ONION,
+            torProxyHost = "127.0.0.1",
+            torProxyPort = 9050,
+        )
+        val torNotification = service.buildNotification(
+            stats = com.example.browser.SessionGuardStats(elapsedMinutes = 7L, totalRounds = 2),
+            config = torConfig,
+            syncStatus = com.example.browser.SessionMonitorSyncStatus.Disabled,
+            torState = com.example.data.TorProxyState.Connected("socks5://127.0.0.1:9050", 14L),
+        )
+        val shadowNotif = Shadows.shadowOf(torNotification)
+        assertEquals(context.getString(R.string.live_monitor_notif_tor_title), shadowNotif.contentTitle.toString())
+        assertTrue(shadowNotif.contentText.toString().contains("Tor Connected (14ms)"))
+        assertEquals(2, torNotification.actions.size)
+        assertEquals(context.getString(R.string.live_monitor_stop_action), torNotification.actions[0].title.toString())
+        assertEquals(context.getString(R.string.live_monitor_new_circuit_action), torNotification.actions[1].title.toString())
+
+        val surfaceNotification = service.buildNotification(
+            stats = com.example.browser.SessionGuardStats(elapsedMinutes = 3L),
+            config = com.example.data.SecurityConfig(browserMode = BrowserMode.SURFACE),
+            syncStatus = com.example.browser.SessionMonitorSyncStatus.Disabled,
+            torState = com.example.data.TorProxyState.Inactive,
+        )
+        assertEquals(1, surfaceNotification.actions.size)
+        controller.destroy()
+    }
+
+    @Test
+    fun `ad blocker detects ad networks path rules custom domains and respects site whitelist`() {
+        assertTrue(TrackerAndUrlEngine.isAdOrTrackerRequest("https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"))
+        assertTrue(TrackerAndUrlEngine.isAdOrTrackerRequest("https://propellerads.com/tag.min.js"))
+        assertTrue(TrackerAndUrlEngine.isAdOrTrackerRequest("https://mc.yandex.ru/metrika/tag.js"))
+        assertTrue(TrackerAndUrlEngine.isAdOrTrackerRequest("https://www.tiktok.com/i18n/pixel/events.js"))
+        assertTrue(
+            TrackerAndUrlEngine.isAdOrTrackerRequest(
+                url = "https://cdn.thirdparty.net/pagead/banner.js",
+                pageUrl = "https://news.example.org/article",
+            ),
+        )
+        assertTrue(
+            TrackerAndUrlEngine.isAdOrTrackerRequest(
+                url = "https://annoying-promo.example.net/banner.png",
+                pageUrl = "https://news.example.org/article",
+                customBlockedDomains = setOf("annoying-promo.example.net"),
+            ),
+        )
+        assertFalse(
+            TrackerAndUrlEngine.isAdOrTrackerRequest(
+                url = "https://doubleclick.net/pixel.gif",
+                pageUrl = "https://trusted.example.org/home",
+                whitelistHosts = setOf("trusted.example.org"),
+            ),
+        )
+
+        assertTrue(TrackerAndUrlEngine.isPopupAdUrl("https://popads.net/pop.js"))
+        assertTrue(TrackerAndUrlEngine.isPopupAdUrl("https://promo.example.com/popunder?id=1"))
+        assertFalse(TrackerAndUrlEngine.isPopupAdUrl("https://en.wikipedia.org/wiki/Tor_(network)"))
+
+        assertEquals(
+            "application/javascript",
+            TrackerAndUrlEngine.emptyBlockedResponseForUrl("https://doubleclick.net/ads.js").mimeType,
+        )
+    }
+
+    @Test
+    fun `privacy scripts generate cosmetic adblock css and popup guard when enabled`() {
+        val script = PrivacyScripts.buildHardeningScript(
+            seed = "TESTSEED",
+            enableWebRtcGuard = false,
+            enableFingerprintRandomization = false,
+            enableCosmeticAdBlock = true,
+            enablePopupGuard = true,
+        )
+        assertTrue(script.contains("os-cosmetic-adblock"))
+        assertTrue(script.contains("adsbygoogle"))
+        assertTrue(script.contains("__osPopupGuardInstalled"))
+    }
+
+    @Test
+    fun `privacy preferences repository toggles javascript webrtc https and applies defaults`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = com.example.data.PrivacyPreferencesRepository(context)
+
+        repo.setNoScript(true)
+        repo.setWebRtcLeakProtection(false)
+        repo.setHttpsEverywhere(false)
+        repo.addTrustedJsHost("example.org")
+
+        var current = repo.securityConfig.first()
+        assertTrue(current.noScriptEnabled)
+        assertFalse(current.webRtcLeakProtectionEnabled)
+        assertFalse(current.httpsEverywhereEnabled)
+        assertTrue(current.trustedJsHosts.contains("example.org"))
+
+        repo.removeTrustedJsHost("example.org")
+        current = repo.securityConfig.first()
+        assertFalse(current.trustedJsHosts.contains("example.org"))
+
+        repo.applyPrivacyDefaults(maximumPrivacy = true)
+        current = repo.securityConfig.first()
+        assertTrue(current.noScriptEnabled)
+        assertTrue(current.webRtcLeakProtectionEnabled)
+        assertTrue(current.httpsEverywhereEnabled)
+        assertEquals(CircuitPrivacyLevel.STRICT, current.circuitPrivacyLevel)
+
+        repo.applyPrivacyDefaults(maximumPrivacy = false)
+        current = repo.securityConfig.first()
+        assertFalse(current.noScriptEnabled)
+        assertTrue(current.webRtcLeakProtectionEnabled)
+        assertTrue(current.httpsEverywhereEnabled)
+        assertEquals(CircuitPrivacyLevel.STANDARD, current.circuitPrivacyLevel)
     }
 }
