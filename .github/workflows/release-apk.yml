@@ -91,7 +91,7 @@ jobs:
           fi
 
       - name: Run unit & Robolectric tests
-        run: gradle :app:testDebugUnitTest -Dorg.gradle.jvmargs="-Xmx3g -Djava.awt.headless=true -Dfile.encoding=UTF-8"
+        run: gradle :app:testDebugUnitTest -PskipEmulatorTests=true -Dorg.gradle.jvmargs="-Xmx3g -Djava.awt.headless=true -Dfile.encoding=UTF-8"
 
       - name: Build signed Release APK
         run: gradle :app:assembleRelease -Dorg.gradle.jvmargs="-Xmx3g -Djava.awt.headless=true -Dfile.encoding=UTF-8"

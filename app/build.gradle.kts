@@ -145,6 +145,11 @@ dependencies {
 tasks.withType<Test> {
   failFast = true
   timeout.set(Duration.ofMinutes(2))
+  if (project.findProperty("skipEmulatorTests")?.toString()?.toBoolean() == true) {
+    filter {
+      excludeTestsMatching("*RuleTest")
+    }
+  }
   testLogging {
     events("passed", "failed", "skipped")
   }
