@@ -524,4 +524,16 @@ class ExampleRobolectricTest {
         assertTrue(current.httpsEverywhereEnabled)
         assertEquals(CircuitPrivacyLevel.STANDARD, current.circuitPrivacyLevel)
     }
+
+    @Test
+    fun `resolveDefaultWebClientId handles both configured and unconfigured builds safely`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+        val resolved = com.example.ui.screens.resolveDefaultWebClientId(context)
+        if (resId != 0) {
+            assertEquals(context.getString(resId), resolved)
+        } else {
+            assertEquals(null, resolved)
+        }
+    }
 }

@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.util.Log
@@ -75,7 +76,6 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.example.R
 import com.example.browser.TrackerAndUrlEngine
 import com.example.data.BookmarkEntity
 import com.example.data.HistoryEntity
@@ -256,6 +256,13 @@ private fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
     awaitClose { removeAuthStateListener(listener) }
 }
 
+@SuppressLint("DiscouragedApi")
+internal fun resolveDefaultWebClientId(context: Context): String? {
+    val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+    if (resId == 0) return null
+    return runCatching { context.getString(resId) }.getOrNull()?.takeIf { it.isNotBlank() }
+}
+
 private fun attemptAutoSignIn(
     context: Context,
     credentialManager: CredentialManager,
@@ -267,9 +274,8 @@ private fun attemptAutoSignIn(
         onAuthSuccess()
         return
     }
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
+    val clientId = resolveDefaultWebClientId(context)
+    if (clientId == null) {
         onUnauthenticated()
         return
     }
@@ -308,9 +314,8 @@ private fun onGoogleSignInClicked(
     scope: CoroutineScope,
     onAuthCancelled: () -> Unit = {},
 ) {
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
+    val clientId = resolveDefaultWebClientId(context)
+    if (clientId == null) {
         onAuthError("Google Sign-In configuration missing: default_web_client_id not found")
         return
     }
