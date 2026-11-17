@@ -11,6 +11,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
+import javax.crypto.Mac
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
@@ -26,7 +27,10 @@ object VaultCryptoManager {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private const val KEY_ALIAS = "onionshield_vault_aes256_v1"
     private const val BIOMETRIC_KEK_ALIAS = "onionshield_vault_biometric_kek_v1"
+    private const val SEARCH_HISTORY_KEY_ALIAS = "onionshield_search_history_aes256_v1"
+    private const val SEARCH_HISTORY_HMAC_ALIAS = "onionshield_search_history_hmac_v1"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
+    private const val HMAC_ALGORITHM = "HmacSHA256"
     private const val GCM_TAG_BITS = 128
     private const val GCM_IV_BYTES = 12
     private const val DEK_BYTES = 32
@@ -58,6 +62,60 @@ object VaultCryptoManager {
         val fallbackMaterial = (context?.packageName ?: "com.example.onionshield.test").toByteArray(Charsets.UTF_8)
         val digest = MessageDigest.getInstance("SHA-256").digest(fallbackMaterial)
         return SecretKeySpec(digest, "AES")
+    }
+
+    fun getOrCreateSearchHistoryKey(context: Context? = null): SecretKey {
+        runCatching {
+            val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val existing = ks.getKey(SEARCH_HISTORY_KEY_ALIAS, null) as? SecretKey
+            if (existing != null) return existing
+
+            val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+            val spec = KeyGenParameterSpec.Builder(
+                SEARCH_HISTORY_KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .setRandomizedEncryptionRequired(true)
+                .build()
+            keyGenerator.init(spec)
+            return keyGenerator.generateKey()
+        }
+
+        val fallbackMaterial = "${context?.packageName ?: "com.example.onionshield.test"}:search_history_v1"
+            .toByteArray(Charsets.UTF_8)
+        val digest = MessageDigest.getInstance("SHA-256").digest(fallbackMaterial)
+        return SecretKeySpec(digest, "AES")
+    }
+
+    fun computeSearchHistoryHmac(normalizedInput: String, context: Context? = null): String {
+        val clean = normalizedInput.trim().lowercase()
+        val hmacKey = runCatching {
+            val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val existing = ks.getKey(SEARCH_HISTORY_HMAC_ALIAS, null) as? SecretKey
+            if (existing != null) {
+                existing
+            } else {
+                val keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, ANDROID_KEYSTORE)
+                val spec = KeyGenParameterSpec.Builder(
+                    SEARCH_HISTORY_HMAC_ALIAS,
+                    KeyProperties.PURPOSE_SIGN,
+                ).build()
+                keyGen.init(spec)
+                keyGen.generateKey()
+            }
+        }.getOrElse {
+            val fallbackMaterial = "${context?.packageName ?: "com.example.onionshield.test"}:search_hmac_v1"
+                .toByteArray(Charsets.UTF_8)
+            SecretKeySpec(MessageDigest.getInstance("SHA-256").digest(fallbackMaterial), HMAC_ALGORITHM)
+        }
+
+        val mac = Mac.getInstance(HMAC_ALGORITHM)
+        mac.init(hmacKey)
+        val bytes = mac.doFinal(clean.toByteArray(Charsets.UTF_8))
+        return bytes.joinToString("") { "%02x".format(it) }
     }
 
     fun getOrCreateBiometricKek(): SecretKey {

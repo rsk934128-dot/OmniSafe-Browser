@@ -51,8 +51,11 @@ import com.example.data.TorCircuitDiagnostic
 import com.example.data.TorProxyState
 import com.example.data.VaultEntryEntity
 import com.example.data.VaultEntryType
+import com.example.data.repository.DecryptedSearchHistoryItem
+import com.example.data.repository.EncryptedSearchHistoryRepository
 import com.example.data.repository.SessionMonitorFirestoreRepository
 import com.example.security.VaultCryptoManager
+import com.example.ui.screens.AppLockPolicy
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import java.util.UUID
@@ -90,6 +93,8 @@ data class BrowserUiState(
     val decryptedVaultItems: List<DecryptedVaultItem> = emptyList(),
     val linkMenuTarget: LinkMenuTarget? = null,
     val statusBannerMessage: String? = null,
+    val isAppLocked: Boolean = true,
+    val isAppLockConfigLoaded: Boolean = false,
 ) {
     val activeTab: BrowserTab
         get() = tabs.firstOrNull { it.id == activeTabId } ?: tabs.first()
@@ -98,7 +103,9 @@ data class BrowserUiState(
 class BrowserViewModel(application: Application) : AndroidViewModel(application), WebViewEventCallbacks {
 
     private val prefsRepo = PrivacyPreferencesRepository(application)
-    private val libraryRepo = BrowserLibraryRepository(OnionShieldDatabase.getInstance(application))
+    private val localDb = OnionShieldDatabase.getInstance(application)
+    private val libraryRepo = BrowserLibraryRepository(localDb)
+    private val searchHistoryRepo = EncryptedSearchHistoryRepository(application, localDb.searchHistoryDao())
     val webViewPool = WebViewPool(application, this)
 
     private val _uiState = MutableStateFlow(BrowserUiState())
@@ -119,7 +126,26 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     val sessionRoundLogs: StateFlow<List<SessionRoundLogEntity>> = libraryRepo.sessionRoundLogs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val recentSearchHistory: StateFlow<List<DecryptedSearchHistoryItem>> =
+        searchHistoryRepo.observeRecentSearches(limit = 30)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val omniboxSuggestions: StateFlow<List<DecryptedSearchHistoryItem>> = combine(
+        recentSearchHistory,
+        _uiState.map { it.omniboxInput to it.isOmniboxFocused }.distinctUntilChanged(),
+    ) { items, (input, focused) ->
+        if (!focused) {
+            emptyList()
+        } else {
+            val activeUrl = _uiState.value.activeTab.url
+            val queryFilter = if (input == activeUrl) "" else input
+            EncryptedSearchHistoryRepository.filterSuggestions(items, queryFilter, maxResults = 6)
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val isForegroundServiceRunning: StateFlow<Boolean> = LiveSessionRuntime.isForegroundServiceRunning
+    val isMediaPlaybackActive: StateFlow<Boolean> = LiveSessionRuntime.isMediaPlaybackActive
+    val activeMediaTitle: StateFlow<String> = LiveSessionRuntime.activeMediaTitle
 
     val sessionGuardStats: StateFlow<SessionGuardStats> = combine(
         sessionRoundLogs,
@@ -174,9 +200,16 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             prefsRepo.securityConfig.collectLatest { config ->
                 _uiState.update { current ->
+                    val nextLocked = AppLockPolicy.resolveConfigUpdate(
+                        currentLocked = current.isAppLocked,
+                        isConfigLoaded = current.isAppLockConfigLoaded,
+                        biometricAppLockEnabled = config.biometricAppLockEnabled,
+                    )
                     current.copy(
                         securityConfig = config,
                         showDisclaimerDialog = !config.disclaimerAccepted,
+                        isAppLocked = nextLocked,
+                        isAppLockConfigLoaded = true,
                     )
                 }
                 webViewPool.updateSecurityConfig(config)
@@ -259,6 +292,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             roundsFlow = sessionRoundLogs,
             isPausedFlow = LiveSessionRuntime.isForegroundServiceRunning,
         )
+
+        viewModelScope.launch {
+            LiveSessionRuntime.mediaControlCommands.collectLatest { cmd ->
+                if (cmd == LiveMonitorForegroundService.CMD_PAUSE_MEDIA) {
+                    webViewPool.pauseAllMedia()
+                }
+            }
+        }
     }
 
     private suspend fun applyProxyForMode(config: SecurityConfig) {
@@ -405,8 +446,31 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             )
         }
         if (resolved != ABOUT_START_URL) {
+            val cleanQuery = rawInput.trim()
+            if (cleanQuery.isNotEmpty()) {
+                viewModelScope.launch {
+                    searchHistoryRepo.recordSearch(
+                        rawQuery = cleanQuery,
+                        resolvedUrl = resolved,
+                        isOnion = isOnion,
+                    )
+                }
+            }
             val tab = _uiState.value.tabs.firstOrNull { it.id == targetTabId } ?: _uiState.value.activeTab
             webViewPool.loadUrlForTab(tab.id, tab.fingerprintSeed, cfg, resolved)
+        }
+    }
+
+    fun deleteRecentSearch(id: Long) {
+        viewModelScope.launch {
+            searchHistoryRepo.deleteSearch(id)
+        }
+    }
+
+    fun clearRecentSearches() {
+        viewModelScope.launch {
+            searchHistoryRepo.clearAll()
+            _uiState.update { it.copy(statusBannerMessage = "Encrypted omnibox search history cleared.") }
         }
     }
 
@@ -576,6 +640,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     fun confirmShredSession() {
         webViewPool.shredAllSessions()
         unlockedVaultKey = null
+        viewModelScope.launch { searchHistoryRepo.clearAll() }
         val seed = UUID.randomUUID().toString().take(8).uppercase()
         val profile = PrivacyScripts.profileForSeed(seed)
         val cleanTab = BrowserTab(
@@ -1270,6 +1335,73 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             _uiState.update {
                 it.copy(statusBannerMessage = "Background live monitor stopped.")
             }
+        }
+    }
+
+    fun setBackgroundMediaPlayback(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setBackgroundMediaPlayback(enabled)
+        _uiState.update {
+            it.copy(
+                statusBannerMessage = if (enabled) {
+                    "Background YouTube & media playback enabled."
+                } else {
+                    "Background media keep-alive disabled."
+                },
+            )
+        }
+    }
+
+    fun onAppBackgrounded() {
+        val cfg = _uiState.value.securityConfig
+        val hasOpenWebTab = _uiState.value.tabs.any { !it.isStartPage }
+        val mediaPlaying = LiveSessionRuntime.isMediaPlaybackActive.value
+
+        if (cfg.backgroundMediaPlaybackEnabled && (mediaPlaying || hasOpenWebTab)) {
+            if (!LiveSessionRuntime.isForegroundServiceRunning.value &&
+                (mediaPlaying || cfg.backgroundLiveServiceEnabled)
+            ) {
+                runCatching { LiveMonitorForegroundService.start(getApplication()) }
+            }
+            webViewPool.onAppBackgrounded(keepMediaAlive = true)
+        } else if (cfg.backgroundLiveServiceEnabled &&
+            !LiveSessionRuntime.isForegroundServiceRunning.value &&
+            hasNotificationPermission()
+        ) {
+            runCatching { LiveMonitorForegroundService.start(getApplication()) }
+        }
+    }
+
+    fun onAppForegrounded() {
+        webViewPool.onAppForegrounded()
+    }
+
+    fun unlockApp() {
+        _uiState.update { it.copy(isAppLocked = false) }
+    }
+
+    fun lockAppNow() {
+        lockVault()
+        _uiState.update { it.copy(isAppLocked = true) }
+    }
+
+    fun lockAppIfEnabled() {
+        if (AppLockPolicy.shouldLockOnBackground(_uiState.value.securityConfig.biometricAppLockEnabled)) {
+            lockVault()
+            _uiState.update { it.copy(isAppLocked = true) }
+        }
+    }
+
+    fun setBiometricAppLockEnabled(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setBiometricAppLockEnabled(enabled)
+        _uiState.update {
+            it.copy(
+                isAppLocked = AppLockPolicy.resolveAfterToggle(it.isAppLocked, enabled),
+                statusBannerMessage = if (enabled) {
+                    "Biometric App Lock enabled — required when opening or returning to OnionShield."
+                } else {
+                    "Biometric App Lock disabled."
+                },
+            )
         }
     }
 

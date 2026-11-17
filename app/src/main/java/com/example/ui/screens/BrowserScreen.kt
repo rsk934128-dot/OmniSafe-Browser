@@ -1,7 +1,12 @@
 package com.example.ui.screens
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.BorderStroke
@@ -31,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.AddToHomeScreen
+import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Close
@@ -40,11 +46,14 @@ import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.EnhancedEncryption
 import androidx.compose.material.icons.rounded.Gavel
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
@@ -82,6 +91,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -89,8 +99,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
 import com.example.browser.GuardAlertLevel
+import com.example.browser.LiveMonitorForegroundService
 import com.example.browser.TorProxyController
 import com.example.browser.TrackerAndUrlEngine
 import com.example.data.ABOUT_START_URL
@@ -105,6 +118,7 @@ import com.example.ui.components.DisclaimerDialog
 import com.example.ui.components.DownloadSandboxDialog
 import com.example.ui.components.InstallHomeAppDialog
 import com.example.ui.components.LinkActionSheet
+import com.example.ui.components.QrScannerModal
 import com.example.ui.components.QuickShieldSheet
 import com.example.ui.components.ShredConfirmDialog
 import com.example.ui.components.StartPageContent
@@ -122,6 +136,8 @@ fun BrowserScreen(
     onOpenVault: () -> Unit = {},
     onOpenCloudSync: () -> Unit = {},
     onOpenSessionGuard: () -> Unit = {},
+    onOpenAdminPanel: () -> Unit = {},
+    onOpenAdminSettings: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -129,8 +145,30 @@ fun BrowserScreen(
     val shieldColors = LocalShieldColors.current
 
     val pinnedApps by viewModel.pinnedApps.collectAsStateWithLifecycle()
+    val omniboxSuggestions by viewModel.omniboxSuggestions.collectAsStateWithLifecycle()
     val sessionGuardStats by viewModel.sessionGuardStats.collectAsStateWithLifecycle()
     val isForegroundServiceRunning by viewModel.isForegroundServiceRunning.collectAsStateWithLifecycle()
+    val isMediaPlaybackActive by viewModel.isMediaPlaybackActive.collectAsStateWithLifecycle()
+    var mediaNotifPromptDismissed by remember { mutableStateOf(false) }
+    var hasNotifPerm by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val mediaNotifPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        hasNotifPerm = granted
+        if (granted) {
+            LiveMonitorForegroundService.start(context)
+        } else {
+            mediaNotifPromptDismissed = true
+        }
+    }
     val fullscreenCustomView by viewModel.fullscreenCustomView.collectAsStateWithLifecycle()
 
     var showTabSwitcher by remember { mutableStateOf(false) }
@@ -138,6 +176,7 @@ fun BrowserScreen(
     var showCircuitDiagnostics by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showCustomLinkInstallDialog by remember { mutableStateOf(false) }
+    var showQrScanner by remember { mutableStateOf(false) }
 
     val activeTab = uiState.activeTab
     val isTorMode = uiState.securityConfig.browserMode == BrowserMode.TOR_ONION
@@ -350,6 +389,22 @@ fun BrowserScreen(
                         }
                     }
 
+                    IconButton(
+                        onClick = {
+                            focusManager.clearFocus()
+                            showQrScanner = true
+                        },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("omnibox_qr_scan_button"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.QrCodeScanner,
+                            contentDescription = stringResource(R.string.cd_scan_qr),
+                            tint = accentColor,
+                        )
+                    }
+
                     if (!activeTab.isStartPage) {
                         IconButton(
                             onClick = {
@@ -541,6 +596,16 @@ fun BrowserScreen(
                                         },
                                     )
                                 }
+                                DropdownMenuItem(
+                                    text = { Text("Scan QR Code URL") },
+                                    leadingIcon = { Icon(Icons.Rounded.QrCodeScanner, contentDescription = null) },
+                                    modifier = Modifier.testTag("menu_scan_qr"),
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        focusManager.clearFocus()
+                                        showQrScanner = true
+                                    },
+                                )
                                 HorizontalDivider()
                                 DropdownMenuItem(
                                     text = { Text("Bookmarks & History") },
@@ -597,6 +662,24 @@ fun BrowserScreen(
                                     onClick = {
                                         showOverflowMenu = false
                                         onOpenSecuritySettings()
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Admin Panel") },
+                                    leadingIcon = { Icon(Icons.Rounded.AdminPanelSettings, contentDescription = null) },
+                                    modifier = Modifier.testTag("menu_admin_panel"),
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        onOpenAdminPanel()
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Server Admin Settings") },
+                                    leadingIcon = { Icon(Icons.Rounded.Security, contentDescription = null) },
+                                    modifier = Modifier.testTag("menu_admin_settings"),
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        onOpenAdminSettings()
                                     },
                                 )
                                 DropdownMenuItem(
@@ -747,6 +830,58 @@ fun BrowserScreen(
                         }
                     }
 
+                    if (isMediaPlaybackActive &&
+                        uiState.securityConfig.backgroundMediaPlaybackEnabled &&
+                        !hasNotifPerm &&
+                        !mediaNotifPromptDismissed &&
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                    ) {
+                        Surface(
+                            color = shieldColors.secureGreenContainer.copy(alpha = 0.85f),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PlayCircle,
+                                        contentDescription = "Background media ready",
+                                        tint = shieldColors.secureGreen,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Text(
+                                        text = "Allow notification so YouTube & audio keep playing after exiting the app",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                TextButton(
+                                    onClick = { mediaNotifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                    modifier = Modifier.testTag("allow_media_notif_button"),
+                                ) {
+                                    Text(
+                                        text = "Allow",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = shieldColors.secureGreen,
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         BrowserWebView(
                             url = activeTab.url,
@@ -789,6 +924,118 @@ fun BrowserScreen(
                                 onOpenOrbot = { TorProxyController.launchOrbot(context) },
                                 onOpenProxySettings = onOpenSecuritySettings,
                             )
+                        }
+                    }
+                }
+            }
+
+            // Encrypted Omnibox Recent Searches Dropdown
+            AnimatedVisibility(
+                visible = uiState.isOmniboxFocused && omniboxSuggestions.isNotEmpty(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 640.dp)
+                        .testTag("omnibox_suggestions_panel"),
+                    shape = MaterialTheme.shapes.large,
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 6.dp,
+                    border = BorderStroke(1.dp, accentColor.copy(alpha = 0.55f)),
+                ) {
+                    Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Lock,
+                                    contentDescription = "AES-256 encrypted search history",
+                                    tint = shieldColors.secureGreen,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                                Text(
+                                    text = "Encrypted Recent Searches",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = shieldColors.secureGreen,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                            TextButton(
+                                onClick = viewModel::clearRecentSearches,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.testTag("omnibox_clear_history_button"),
+                            ) {
+                                Text(
+                                    text = "Clear",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+
+                        omniboxSuggestions.forEach { item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        focusManager.clearFocus()
+                                        viewModel.openUrlOrSearch(item.query)
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                                    .testTag("omnibox_suggestion_item_${item.id}"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (item.isOnion) Icons.Rounded.Security else Icons.Rounded.History,
+                                    contentDescription = null,
+                                    tint = if (item.isOnion) shieldColors.torAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = item.query,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    if (item.resolvedUrl != item.query) {
+                                        Text(
+                                            text = item.resolvedUrl,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                                IconButton(
+                                    onClick = { viewModel.deleteRecentSearch(item.id) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("omnibox_delete_suggestion_${item.id}"),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = "Remove search entry",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -857,6 +1104,7 @@ fun BrowserScreen(
             onToggleSiteAdBlockWhitelist = viewModel::toggleAdBlockWhitelistCurrentSite,
             onToggleThirdPartyCookies = viewModel::setBlockThirdPartyCookies,
             onToggleBackgroundLiveService = viewModel::setBackgroundLiveServiceEnabled,
+            onToggleBackgroundMedia = viewModel::setBackgroundMediaPlayback,
             onRotateSeed = viewModel::regenerateFingerprintSeed,
             onOpenCircuitDiagnostics = {
                 showQuickShields = false
@@ -929,6 +1177,19 @@ fun BrowserScreen(
                 showCustomLinkInstallDialog = false
                 viewModel.installLinkToHomeAndMenu(context, rawTitle, rawUrl)
             },
+        )
+    }
+
+    if (showQrScanner) {
+        QrScannerModal(
+            isTorMode = isTorMode,
+            onOpenScannedInput = { scannedInput ->
+                showQrScanner = false
+                focusManager.clearFocus()
+                viewModel.openUrlOrSearch(scannedInput)
+                viewModel.showStatusBanner("Opened QR link: $scannedInput")
+            },
+            onDismiss = { showQrScanner = false },
         )
     }
 }

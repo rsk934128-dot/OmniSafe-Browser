@@ -2,17 +2,19 @@ package com.example.browser
 
 import com.example.data.SecurityConfig
 import com.example.data.SessionRoundLogEntity
+import com.example.data.repository.AuthContextProvider
+import com.example.data.repository.FirebaseAuthContextProvider
 import com.example.data.repository.SessionMonitorFirestoreRepository
+import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.auth
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
@@ -41,23 +43,28 @@ private data class LiveSyncPayload(
  */
 class SessionMonitorSyncService(
     private val repository: SessionMonitorFirestoreRepository,
-    private val auth: FirebaseAuth,
+    private val auth: FirebaseAuth = Firebase.auth,
     private val scope: CoroutineScope,
+    private val authContextProvider: AuthContextProvider = FirebaseAuthContextProvider(auth),
 ) {
+    constructor(
+        repository: SessionMonitorFirestoreRepository,
+        authContextProvider: AuthContextProvider,
+        scope: CoroutineScope,
+    ) : this(
+        repository = repository,
+        auth = Firebase.auth,
+        scope = scope,
+        authContextProvider = authContextProvider,
+    )
+
     private val _syncStatus = MutableStateFlow<SessionMonitorSyncStatus>(SessionMonitorSyncStatus.Disabled)
     val syncStatus: StateFlow<SessionMonitorSyncStatus> = _syncStatus.asStateFlow()
 
     private val syncedRoundKeys = mutableSetOf<String>()
     private var monitorJob: Job? = null
 
-    private fun authUserIdFlow(): Flow<String?> = callbackFlow {
-        val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
-            trySend(firebaseAuth.currentUser?.uid)
-        }
-        trySend(auth.currentUser?.uid)
-        auth.addAuthStateListener(listener)
-        awaitClose { auth.removeAuthStateListener(listener) }
-    }
+    private fun authUserIdFlow(): Flow<String?> = authContextProvider.observeUserId()
 
     @OptIn(FlowPreview::class)
     fun startObserving(
@@ -134,7 +141,7 @@ class SessionMonitorSyncService(
     }
 
     suspend fun deleteRemoteRoundForLocal(round: SessionRoundLogEntity) {
-        if (auth.currentUser == null) return
+        if (authContextProvider.currentUser == null) return
         val roundId = SessionMonitorFirestoreRepository.deterministicRoundId(round)
         repository.deleteRemoteRound(roundId)
     }

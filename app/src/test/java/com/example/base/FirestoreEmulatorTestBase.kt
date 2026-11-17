@@ -79,6 +79,18 @@ abstract class FirestoreEmulatorTestBase {
         }
     }
 
+    protected suspend fun <T> withAuthenticatedEmulatorUser(
+        email: String,
+        block: suspend (uid: String) -> T,
+    ): T {
+        val uid = signInTestUser(email)
+        return try {
+            block(uid)
+        } finally {
+            auth.signOut()
+        }
+    }
+
     protected fun Throwable.unwrapFirestoreException(): FirebaseFirestoreException? {
         var current: Throwable? = this
         while (current != null) {

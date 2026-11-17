@@ -1,6 +1,7 @@
 package com.example.data
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "bookmarks")
@@ -65,4 +66,17 @@ data class SessionRoundLogEntity(
     val netProfit: Double,
     val note: String = "",
     val createdAt: Long = System.currentTimeMillis(),
+)
+
+@Entity(
+    tableName = "encrypted_search_history",
+    indices = [Index(value = ["queryHash"], unique = true)],
+)
+data class EncryptedSearchHistoryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val queryHash: String,
+    val queryCiphertext: String,
+    val resolvedUrlCiphertext: String,
+    val isOnion: Boolean = false,
+    val lastSearchedAt: Long = System.currentTimeMillis(),
 )

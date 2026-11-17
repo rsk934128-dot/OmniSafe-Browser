@@ -102,14 +102,24 @@ data class SyncedLinksSnapshot(
 class CloudSyncRepository(
     private val db: FirebaseFirestore,
     private val auth: FirebaseAuth = Firebase.auth,
+    private val authContextProvider: AuthContextProvider = FirebaseAuthContextProvider(auth),
 ) {
+    constructor(
+        db: FirebaseFirestore,
+        authContextProvider: AuthContextProvider,
+    ) : this(
+        db = db,
+        auth = Firebase.auth,
+        authContextProvider = authContextProvider,
+    )
+
     constructor(context: Context) : this(
         db = FirestoreClientProvider.getInstance(context),
         auth = Firebase.auth,
     )
 
     private fun requireUserId(): String {
-        return auth.currentUser?.uid
+        return authContextProvider.currentUser?.uid
             ?: throw IllegalStateException("User must be signed in with Google before accessing Firestore.")
     }
 
@@ -135,7 +145,7 @@ class CloudSyncRepository(
                         .firstOrNull()
                     if (firestoreError == null && error is CancellationException) throw error
                     val exceptionToLog = firestoreError ?: (error as? Exception)
-                    if (exceptionToLog != null && auth.currentUser?.uid == userId) {
+                    if (exceptionToLog != null && authContextProvider.currentUser?.uid == userId) {
                         handleFirestoreError(exceptionToLog, OperationType.LIST, path, auth)
                     }
                     throw error
@@ -150,7 +160,10 @@ class CloudSyncRepository(
         val uid = runCatching { requireUserId() }.getOrElse { return Result.failure(it) }
         val docRef = db.collection("users").document(uid).collection("synced_links").document(linkId)
         return try {
-            val snap = docRef.get().await()
+            val defaultSnap = withTimeoutOrNull(OFFLINE_CHECK_TIMEOUT_MS) {
+                docRef.get(Source.DEFAULT).await()
+            }
+            val snap = defaultSnap ?: docRef.get(Source.CACHE).await()
             val item = snap.toObject(SyncedLink::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
             Result.success(item)
         } catch (e: CancellationException) {

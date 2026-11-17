@@ -197,6 +197,146 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Trusted admin role registry entry keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Admin Firebase Auth UID."
+        },
+        "email": {
+          "type": "string",
+          "description": "Verified admin email address."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin"],
+          "description": "Assigned privilege role."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when admin entry was created."
+        }
+      },
+      "required": ["uid", "email", "role", "createdAt"]
+    },
+    "AdminServerConfig": {
+      "title": "AdminServerConfig",
+      "description": "Server-side remote configuration toggles managed by administrators.",
+      "type": "object",
+      "properties": {
+        "maintenanceMode": {
+          "type": "boolean",
+          "description": "Whether global maintenance mode is enabled."
+        },
+        "strictTorRequired": {
+          "type": "boolean",
+          "description": "Whether strict Tor .onion routing enforcement is mandated server-side."
+        },
+        "remoteTelemetryEnabled": {
+          "type": "boolean",
+          "description": "Whether remote diagnostic telemetry streaming is enabled."
+        },
+        "forceAdBlockSync": {
+          "type": "boolean",
+          "description": "Whether clients should force-sync global ad-block filter lists."
+        },
+        "emergencyLockdown": {
+          "type": "boolean",
+          "description": "Whether emergency maximum-privacy lockdown posture is active."
+        },
+        "maintenanceBanner": {
+          "type": "string",
+          "description": "Short notice banner shown during maintenance or lockdown."
+        },
+        "updatedByUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the administrator who last modified the config."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Initial server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last server update timestamp."
+        }
+      },
+      "required": [
+        "maintenanceMode",
+        "strictTorRequired",
+        "remoteTelemetryEnabled",
+        "forceAdBlockSync",
+        "emergencyLockdown",
+        "maintenanceBanner",
+        "updatedByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MaintenanceLog": {
+      "title": "MaintenanceLog",
+      "description": "Audit and maintenance event log entry recorded by administrators.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "Short summary of the maintenance action."
+        },
+        "category": {
+          "type": "string",
+          "enum": ["CONFIG", "SECURITY", "TOR_NETWORK", "MAINTENANCE", "AUDIT"],
+          "description": "Log category tag."
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["INFO", "WARN", "CRITICAL"],
+          "description": "Severity level of the maintenance log."
+        },
+        "details": {
+          "type": "string",
+          "description": "Detailed operational notes."
+        },
+        "actorUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the acting administrator."
+        },
+        "actorEmail": {
+          "type": "string",
+          "description": "Email address of the acting administrator."
+        },
+        "clientTimestampMs": {
+          "type": "integer",
+          "description": "Client epoch timestamp in milliseconds for deterministic ordering."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "action",
+        "category",
+        "severity",
+        "details",
+        "actorUid",
+        "actorEmail",
+        "clientTimestampMs",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -211,6 +351,18 @@
     "/users/{userId}/session_rounds/{roundId}": {
       "schema": { "$ref": "#/entities/SessionRound" },
       "description": "Per-user completed round logs synced in real time."
+    },
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Trusted administrator registry keyed by Firebase Auth UID."
+    },
+    "/admin_config/{configId}": {
+      "schema": { "$ref": "#/entities/AdminServerConfig" },
+      "description": "Server-side admin configuration toggles and notices."
+    },
+    "/maintenance_logs/{logId}": {
+      "schema": { "$ref": "#/entities/MaintenanceLog" },
+      "description": "Administrator maintenance and configuration audit logs."
     }
   }
 }

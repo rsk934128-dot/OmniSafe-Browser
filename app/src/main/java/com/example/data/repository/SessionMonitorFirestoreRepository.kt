@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 
 @IgnoreExtraProperties
@@ -68,14 +69,24 @@ data class RemoteSessionRound(
 class SessionMonitorFirestoreRepository(
     private val db: FirebaseFirestore,
     private val auth: FirebaseAuth = Firebase.auth,
+    private val authContextProvider: AuthContextProvider = FirebaseAuthContextProvider(auth),
 ) {
+    constructor(
+        db: FirebaseFirestore,
+        authContextProvider: AuthContextProvider,
+    ) : this(
+        db = db,
+        auth = Firebase.auth,
+        authContextProvider = authContextProvider,
+    )
+
     constructor(context: Context) : this(
         db = FirestoreClientProvider.getInstance(context),
         auth = Firebase.auth,
     )
 
     private fun requireUserId(): String {
-        return auth.currentUser?.uid
+        return authContextProvider.currentUser?.uid
             ?: throw IllegalStateException("User must be signed in with Google before syncing session monitor.")
     }
 
@@ -103,7 +114,7 @@ class SessionMonitorFirestoreRepository(
                         .firstOrNull()
                     if (firestoreError == null && error is CancellationException) throw error
                     val exceptionToLog = firestoreError ?: (error as? Exception)
-                    if (exceptionToLog != null && auth.currentUser?.uid == userId) {
+                    if (exceptionToLog != null && authContextProvider.currentUser?.uid == userId) {
                         handleFirestoreError(exceptionToLog, OperationType.GET, docPath, auth)
                     }
                     throw error
@@ -130,7 +141,7 @@ class SessionMonitorFirestoreRepository(
                         .firstOrNull()
                     if (firestoreError == null && error is CancellationException) throw error
                     val exceptionToLog = firestoreError ?: (error as? Exception)
-                    if (exceptionToLog != null && auth.currentUser?.uid == userId) {
+                    if (exceptionToLog != null && authContextProvider.currentUser?.uid == userId) {
                         handleFirestoreError(exceptionToLog, OperationType.LIST, collectionPath, auth)
                     }
                     throw error
@@ -174,15 +185,21 @@ class SessionMonitorFirestoreRepository(
         )
 
         return try {
-            val existing = docRef.get().await()
-            if (existing.exists()) {
-                docRef.update(updatableFields).await()
+            val existing = withTimeoutOrNull(OFFLINE_CHECK_TIMEOUT_MS) {
+                runCatching { docRef.get().await() }.getOrNull()
+            }
+            if (existing != null && existing.exists()) {
+                withTimeoutOrNull(OFFLINE_WRITE_ACK_TIMEOUT_MS) {
+                    docRef.update(updatableFields).await()
+                }
             } else {
                 val createFields = updatableFields + mapOf(
                     "userId" to uid,
                     "createdAt" to FieldValue.serverTimestamp(),
                 )
-                docRef.set(createFields).await()
+                withTimeoutOrNull(OFFLINE_WRITE_ACK_TIMEOUT_MS) {
+                    docRef.set(createFields).await()
+                }
             }
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -213,15 +230,21 @@ class SessionMonitorFirestoreRepository(
         )
 
         return try {
-            val existing = docRef.get().await()
-            if (existing.exists()) {
-                docRef.update(updatableFields).await()
+            val existing = withTimeoutOrNull(OFFLINE_CHECK_TIMEOUT_MS) {
+                runCatching { docRef.get().await() }.getOrNull()
+            }
+            if (existing != null && existing.exists()) {
+                withTimeoutOrNull(OFFLINE_WRITE_ACK_TIMEOUT_MS) {
+                    docRef.update(updatableFields).await()
+                }
             } else {
                 val createFields = updatableFields + mapOf(
                     "userId" to uid,
                     "createdAt" to FieldValue.serverTimestamp(),
                 )
-                docRef.set(createFields).await()
+                withTimeoutOrNull(OFFLINE_WRITE_ACK_TIMEOUT_MS) {
+                    docRef.set(createFields).await()
+                }
             }
             Result.success(roundId)
         } catch (e: CancellationException) {
@@ -240,7 +263,9 @@ class SessionMonitorFirestoreRepository(
             .document(roundId)
 
         return try {
-            docRef.delete().await()
+            withTimeoutOrNull(OFFLINE_WRITE_ACK_TIMEOUT_MS) {
+                docRef.delete().await()
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -251,6 +276,8 @@ class SessionMonitorFirestoreRepository(
     }
 
     companion object {
+        private const val OFFLINE_CHECK_TIMEOUT_MS = 1200L
+        private const val OFFLINE_WRITE_ACK_TIMEOUT_MS = 1800L
         const val DEFAULT_MONITOR_ID = "active_session"
 
         fun sanitizeSiteHost(rawHost: String): String {

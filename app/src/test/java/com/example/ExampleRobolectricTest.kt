@@ -7,6 +7,8 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.browser.LiveMonitorForegroundService
 import com.example.browser.LiveSessionRuntime
 import com.example.browser.PrivacyScripts
+import com.example.browser.QrCodeUrlParser
+import com.example.browser.QrScanOutcome
 import com.example.browser.TorCircuitService
 import com.example.browser.TrackerAndUrlEngine
 import com.example.data.ABOUT_START_URL
@@ -14,8 +16,11 @@ import com.example.data.BrowserMode
 import com.example.data.CircuitNodeRole
 import com.example.data.CircuitPrivacyLevel
 import com.example.data.OnionAddressStatus
+import com.example.data.OnionShieldDatabase
 import com.example.data.SearchEngine
+import com.example.data.repository.EncryptedSearchHistoryRepository
 import com.example.security.VaultCryptoManager
+import androidx.room.Room
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -535,5 +540,276 @@ class ExampleRobolectricTest {
         } else {
             assertEquals(null, resolved)
         }
+    }
+
+    @Test
+    fun `admin security score reflects active hardening and lockdown toggles accurately`() {
+        val lockdown = com.example.data.SecurityConfig(
+            noScriptEnabled = true,
+            httpsEverywhereEnabled = true,
+            webRtcLeakProtectionEnabled = true,
+            trackerBlockerEnabled = true,
+            popupBlockerEnabled = true,
+            cosmeticAdBlockEnabled = true,
+            fingerprintRandomizationEnabled = true,
+            blockThirdPartyCookies = true,
+            saveSurfaceHistory = false,
+        )
+        assertEquals(100, com.example.ui.components.computeAdminSecurityScore(lockdown))
+
+        val standard = lockdown.copy(noScriptEnabled = false)
+        assertEquals(90, com.example.ui.components.computeAdminSecurityScore(standard))
+
+        val exposed = com.example.data.SecurityConfig(
+            noScriptEnabled = false,
+            httpsEverywhereEnabled = false,
+            webRtcLeakProtectionEnabled = false,
+            trackerBlockerEnabled = false,
+            popupBlockerEnabled = false,
+            cosmeticAdBlockEnabled = false,
+            fingerprintRandomizationEnabled = false,
+            blockThirdPartyCookies = false,
+            saveSurfaceHistory = true,
+        )
+        assertEquals(0, com.example.ui.components.computeAdminSecurityScore(exposed))
+    }
+
+    @Test
+    fun `privacy scripts inject background media visibility guard when enabled`() {
+        val enabledScript = PrivacyScripts.buildHardeningScript(
+            seed = "MEDIA123",
+            enableWebRtcGuard = false,
+            enableFingerprintRandomization = false,
+            enableCosmeticAdBlock = false,
+            enablePopupGuard = false,
+            enableBackgroundMediaPlayback = true,
+        )
+        assertTrue(enabledScript.contains("__osBgMediaGuardInstalled"))
+        assertTrue(enabledScript.contains("visibilityState"))
+        assertTrue(enabledScript.contains("visibilitychange"))
+        assertTrue(enabledScript.contains("__osBgMediaResumeIfNeeded"))
+        assertTrue(enabledScript.contains("__osBgMediaPauseAll"))
+
+        val disabledScript = PrivacyScripts.buildHardeningScript(
+            seed = "MEDIA123",
+            enableWebRtcGuard = false,
+            enableFingerprintRandomization = false,
+            enableCosmeticAdBlock = false,
+            enablePopupGuard = false,
+            enableBackgroundMediaPlayback = false,
+        )
+        assertEquals("", disabledScript)
+    }
+
+    @Test
+    fun `foreground service notification renders media playback state and persists background media preference`(): Unit = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val controller = Robolectric.buildService(
+            LiveMonitorForegroundService::class.java,
+            Intent(context, LiveMonitorForegroundService::class.java).setAction(LiveMonitorForegroundService.ACTION_START),
+        ).create()
+        val service = controller.get()
+
+        val mediaNotif = service.buildNotification(
+            stats = com.example.browser.SessionGuardStats(elapsedMinutes = 4L),
+            config = com.example.data.SecurityConfig(browserMode = BrowserMode.SURFACE),
+            syncStatus = com.example.browser.SessionMonitorSyncStatus.Disabled,
+            torState = com.example.data.TorProxyState.Inactive,
+            isMediaActive = true,
+            mediaTitle = "Lo-Fi Study Mix - YouTube",
+        )
+        val shadowMediaNotif = Shadows.shadowOf(mediaNotif)
+        assertEquals(context.getString(R.string.live_monitor_notif_media_title), shadowMediaNotif.contentTitle.toString())
+        assertTrue(shadowMediaNotif.contentText.toString().contains("Lo-Fi Study Mix - YouTube"))
+        assertEquals(2, mediaNotif.actions.size)
+        assertEquals(context.getString(R.string.live_monitor_pause_media_action), mediaNotif.actions[1].title.toString())
+
+        val repo = com.example.data.PrivacyPreferencesRepository(context)
+        assertTrue(repo.securityConfig.first().backgroundMediaPlaybackEnabled)
+        repo.setBackgroundMediaPlayback(false)
+        assertFalse(repo.securityConfig.first().backgroundMediaPlaybackEnabled)
+        repo.setBackgroundMediaPlayback(true)
+        assertTrue(repo.securityConfig.first().backgroundMediaPlaybackEnabled)
+        controller.destroy()
+    }
+
+    @Test
+    fun `foreground service acquires and releases PartialWakeLock and WifiLock cleanly`(): Unit = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val startIntent = Intent(context, LiveMonitorForegroundService::class.java)
+            .setAction(LiveMonitorForegroundService.ACTION_START)
+        val controller = Robolectric.buildService(LiveMonitorForegroundService::class.java, startIntent)
+            .create()
+            .startCommand(0, 0)
+        val service = controller.get()
+
+        assertTrue(service.isPartialWakeLockHeld())
+        assertTrue(service.isWifiLockHeld())
+        assertTrue(LiveSessionRuntime.isForegroundServiceRunning.value)
+        assertTrue(LiveSessionRuntime.arePowerLocksHeld.value)
+
+        // Repeated start / circuit refresh remains idempotent without reference-count leak
+        service.onStartCommand(
+            Intent(context, LiveMonitorForegroundService::class.java)
+                .setAction(LiveMonitorForegroundService.ACTION_NEW_CIRCUIT),
+            0,
+            1,
+        )
+        assertTrue(service.isPartialWakeLockHeld())
+        assertTrue(service.isWifiLockHeld())
+
+        // Stopping via ACTION_STOP releases both locks cleanly
+        service.onStartCommand(
+            Intent(context, LiveMonitorForegroundService::class.java)
+                .setAction(LiveMonitorForegroundService.ACTION_STOP),
+            0,
+            2,
+        )
+        assertFalse(service.isPartialWakeLockHeld())
+        assertFalse(service.isWifiLockHeld())
+        assertFalse(LiveSessionRuntime.arePowerLocksHeld.value)
+
+        // Re-acquiring then destroying the service also releases both locks
+        service.onStartCommand(startIntent, 0, 3)
+        assertTrue(service.isPartialWakeLockHeld())
+        assertTrue(service.isWifiLockHeld())
+
+        controller.destroy()
+        assertFalse(service.isPartialWakeLockHeld())
+        assertFalse(service.isWifiLockHeld())
+        assertFalse(LiveSessionRuntime.arePowerLocksHeld.value)
+    }
+
+    @Test
+    fun `encrypted search history stores ciphertext in Room, deduplicates via HMAC, and decrypts for omnibox`(): Unit = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, OnionShieldDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.searchHistoryDao()
+            val repo = EncryptedSearchHistoryRepository(context = context, searchHistoryDao = dao)
+
+            val query1 = "privacy browser test"
+            val url1 = "https://duckduckgo.com/?q=privacy+browser+test"
+            repo.recordSearch(rawQuery = query1, resolvedUrl = url1, isOnion = false, timestampMs = 1000L)
+
+            val query2 = "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
+            val url2 = "http://$query2"
+            repo.recordSearch(rawQuery = query2, resolvedUrl = url2, isOnion = true, timestampMs = 2000L)
+
+            // Verify raw Room entity stores ONLY ciphertext & HMAC hash (zero plaintext leakage)
+            val rawRows = dao.observeRecent(10).first()
+            assertEquals(2, rawRows.size)
+            rawRows.forEach { entity ->
+                assertTrue(entity.queryCiphertext.startsWith("v1:"))
+                assertTrue(entity.resolvedUrlCiphertext.startsWith("v1:"))
+                assertFalse(entity.queryCiphertext.contains("privacy"))
+                assertFalse(entity.resolvedUrlCiphertext.contains("duckduckgo"))
+                assertFalse(entity.queryHash.contains("privacy"))
+                assertEquals(64, entity.queryHash.length)
+            }
+
+            // Re-searching same query deduplicates via HMAC and bumps timestamp
+            repo.recordSearch(rawQuery = "  PRIVACY browser test  ", resolvedUrl = url1, isOnion = false, timestampMs = 5000L)
+            val decrypted = repo.observeRecentSearches(10).first()
+            assertEquals(2, decrypted.size)
+            assertEquals("PRIVACY browser test", decrypted.first().query)
+            assertEquals(5000L, decrypted.first().lastSearchedAt)
+            assertEquals(url1, decrypted.first().resolvedUrl)
+
+            // Suggestion filter matches partial query cleanly
+            val onionMatches = EncryptedSearchHistoryRepository.filterSuggestions(decrypted, "duckduckgogg")
+            assertEquals(1, onionMatches.size)
+            assertTrue(onionMatches.first().isOnion)
+
+            // Delete single & clearAll
+            repo.deleteSearch(onionMatches.first().id)
+            assertEquals(1, repo.observeRecentSearches(10).first().size)
+            repo.clearAll()
+            assertEquals(0, repo.observeRecentSearches(10).first().size)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `qr payload parser extracts safe urls and blocks dangerous schemes`() {
+        assertEquals(
+            QrScanOutcome.NavigableUrl("https://eff.org/privacy"),
+            QrCodeUrlParser.parseQrPayload("https://eff.org/privacy"),
+        )
+        assertEquals(
+            QrScanOutcome.NavigableUrl("http://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"),
+            QrCodeUrlParser.parseQrPayload("http://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"),
+        )
+        assertEquals(
+            QrScanOutcome.NavigableUrl("duckduckgo.com/?q=tor"),
+            QrCodeUrlParser.parseQrPayload("duckduckgo.com/?q=tor"),
+        )
+        assertEquals(
+            QrScanOutcome.NavigableUrl("https://wikipedia.org"),
+            QrCodeUrlParser.parseQrPayload("MEBKM:TITLE:Wiki;URL:https://wikipedia.org;;"),
+        )
+        assertEquals(
+            QrScanOutcome.UnsafeScheme("javascript"),
+            QrCodeUrlParser.parseQrPayload("javascript:alert(1)"),
+        )
+        assertEquals(
+            QrScanOutcome.UnsafeScheme("file"),
+            QrCodeUrlParser.parseQrPayload("file:///etc/passwd"),
+        )
+        assertEquals(
+            QrScanOutcome.UnsafeScheme("data"),
+            QrCodeUrlParser.parseQrPayload("data:text/html,<script>alert(1)</script>"),
+        )
+        assertEquals(
+            QrScanOutcome.NonUrlText("WIFI:S:HomeNet;T:WPA;P:secret;;"),
+            QrCodeUrlParser.parseQrPayload("WIFI:S:HomeNet;T:WPA;P:secret;;"),
+        )
+        assertEquals(
+            QrScanOutcome.Empty,
+            QrCodeUrlParser.parseQrPayload("   "),
+        )
+    }
+
+    @Test
+    fun `biometric app lock defaults enabled, persists toggle, and locks on background when enabled`(): Unit = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = com.example.data.PrivacyPreferencesRepository(context)
+        assertTrue(repo.securityConfig.first().biometricAppLockEnabled)
+
+        // BrowserUiState starts locked before initial config & biometric verification
+        val initialUiState = com.example.ui.BrowserUiState()
+        assertTrue(initialUiState.isAppLocked)
+        assertFalse(initialUiState.isAppLockConfigLoaded)
+
+        // Initial config emission keeps app locked when biometricAppLockEnabled is true
+        assertTrue(
+            com.example.ui.screens.AppLockPolicy.resolveConfigUpdate(
+                currentLocked = true,
+                isConfigLoaded = false,
+                biometricAppLockEnabled = true,
+            ),
+        )
+        // Backgrounding re-locks while enabled
+        assertTrue(com.example.ui.screens.AppLockPolicy.shouldLockOnBackground(true))
+
+        // Toggling preference to false persists and keeps app unlocked across background transitions
+        repo.setBiometricAppLockEnabled(false)
+        assertFalse(repo.securityConfig.first().biometricAppLockEnabled)
+        assertFalse(
+            com.example.ui.screens.AppLockPolicy.resolveConfigUpdate(
+                currentLocked = true,
+                isConfigLoaded = false,
+                biometricAppLockEnabled = false,
+            ),
+        )
+        assertFalse(com.example.ui.screens.AppLockPolicy.resolveAfterToggle(currentLocked = true, enabled = false))
+        assertFalse(com.example.ui.screens.AppLockPolicy.shouldLockOnBackground(false))
+
+        // Restore default enabled state
+        repo.setBiometricAppLockEnabled(true)
+        assertTrue(repo.securityConfig.first().biometricAppLockEnabled)
     }
 }

@@ -107,3 +107,21 @@ interface SessionRoundLogDao {
     @Query("DELETE FROM session_round_logs")
     suspend fun clearAll()
 }
+
+@Dao
+interface SearchHistoryDao {
+    @Query("SELECT * FROM encrypted_search_history ORDER BY lastSearchedAt DESC LIMIT :limit")
+    fun observeRecent(limit: Int = 25): Flow<List<EncryptedSearchHistoryEntity>>
+
+    @Query("SELECT * FROM encrypted_search_history WHERE queryHash = :queryHash LIMIT 1")
+    suspend fun findByHash(queryHash: String): EncryptedSearchHistoryEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entry: EncryptedSearchHistoryEntity): Long
+
+    @Query("DELETE FROM encrypted_search_history WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM encrypted_search_history")
+    suspend fun clearAll()
+}

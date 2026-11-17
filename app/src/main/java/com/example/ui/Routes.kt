@@ -8,4 +8,6 @@ object Routes {
     const val ROUTE_VAULT = "vault"
     const val ROUTE_CLOUD_SYNC = "cloud_sync"
     const val ROUTE_SESSION_GUARD = "session_guard"
+    const val ROUTE_ADMIN_PANEL = "admin_panel"
+    const val ROUTE_ADMIN_SETTINGS = "admin_settings"
 }

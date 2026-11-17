@@ -28,6 +28,24 @@
     <string name="live_monitor_channel_desc">Keeps OnionShield active, maintains Tor proxy connectivity, and syncs live session stats in the background.</string>
     <string name="live_monitor_notif_title">OnionShield Live Monitor</string>
     <string name="live_monitor_notif_tor_title">OnionShield • Tor Keep-Alive Active</string>
+    <string name="live_monitor_notif_media_title">OnionShield • Background Media Playing</string>
     <string name="live_monitor_stop_action">Stop Live</string>
     <string name="live_monitor_new_circuit_action">New Circuit</string>
+    <string name="live_monitor_pause_media_action">Pause Media</string>
+    <string name="cd_scan_qr">Scan QR code to open URL</string>
+    <string name="cd_qr_torch">Toggle camera flashlight</string>
+    <string name="cd_qr_close">Close QR scanner</string>
+    <string name="qr_scanner_title">Scan QR Code</string>
+    <string name="qr_scanner_subtitle">On-device ML Kit scanner • Private &amp; offline</string>
+    <string name="qr_permission_title">Camera Access Needed</string>
+    <string name="qr_permission_desc">Allow camera access to scan QR codes locally on your device. No camera frames leave your phone.</string>
+    <string name="qr_permission_allow">Allow Camera</string>
+    <string name="qr_permission_settings">Open Settings</string>
+    <string name="biometric_lock_title">OnionShield Locked</string>
+    <string name="biometric_lock_subtitle">Verify your fingerprint or face biometric before opening tabs, browsing history, and bookmarks.</string>
+    <string name="biometric_lock_prompt_title">Unlock OnionShield</string>
+    <string name="biometric_lock_prompt_subtitle">Protect browsing history, bookmarks, and active sessions</string>
+    <string name="biometric_lock_unlock_button">Unlock with Biometrics</string>
+    <string name="biometric_lock_enroll_button">Enroll Biometrics</string>
+    <string name="biometric_lock_continue_unconfigured">Continue Without Biometrics</string>
 </resources>

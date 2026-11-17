@@ -257,3 +257,136 @@ test("Session Monitor & Rounds: owner CRUD succeeds, cross-user and invalid payl
   );
   await assertSucceeds(roundRef.delete());
 });
+
+test("Admin Config & Maintenance Logs: unauthenticated, non-admin, and unverified spoof denied; verified & registry admin allowed", async () => {
+  const ADMIN_UID = "admin_uid_001";
+  const BOOTSTRAP_UID = "bootstrap_admin_uid";
+  const now = new Date();
+
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, { email: "alice@example.com", email_verified: true }).firestore();
+  const spoofAdminDb = testEnv.authenticatedContext("spoof_uid", { email: "monikhoku88@gmail.com", email_verified: false }).firestore();
+  const bootstrapAdminDb = testEnv.authenticatedContext(BOOTSTRAP_UID, { email: "monikhoku88@gmail.com", email_verified: true }).firestore();
+  const registryAdminDb = testEnv.authenticatedContext(ADMIN_UID, { email: "secops@onionshield.org", email_verified: true }).firestore();
+
+  // Seed /admins/{ADMIN_UID} via admin context
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("admins").doc(ADMIN_UID).set({
+      uid: ADMIN_UID,
+      email: "secops@onionshield.org",
+      role: "admin",
+      createdAt: now,
+    });
+  });
+
+  // 1. Unauthenticated access denied
+  await assertFails(unauthDb.collection("admin_config").doc("global_settings").get());
+  await assertFails(unauthDb.collection("maintenance_logs").get());
+
+  // 2. Non-admin cannot self-promote or access admin collections
+  await assertFails(
+    aliceDb.collection("admins").doc(ALICE_UID).set({
+      uid: ALICE_UID,
+      email: "alice@example.com",
+      role: "admin",
+      createdAt: now,
+    })
+  );
+  await assertFails(aliceDb.collection("admin_config").doc("global_settings").get());
+  await assertFails(
+    aliceDb.collection("admin_config").doc("global_settings").set({
+      maintenanceMode: true,
+      strictTorRequired: false,
+      remoteTelemetryEnabled: true,
+      forceAdBlockSync: true,
+      emergencyLockdown: false,
+      maintenanceBanner: "Hijack attempt",
+      updatedByUid: ALICE_UID,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  await assertFails(aliceDb.collection("maintenance_logs").get());
+
+  // 3. Unverified email spoof must fail even with bootstrapped email
+  await assertFails(spoofAdminDb.collection("admin_config").doc("global_settings").get());
+  await assertFails(
+    spoofAdminDb.collection("maintenance_logs").doc("log_spoof").set({
+      action: "Spoof log",
+      category: "SECURITY",
+      severity: "WARN",
+      details: "Should fail",
+      actorUid: "spoof_uid",
+      actorEmail: "monikhoku88@gmail.com",
+      clientTimestampMs: 1700000000000,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // 4. Verified bootstrapped admin can create & update admin_config
+  const configRef = bootstrapAdminDb.collection("admin_config").doc("global_settings");
+  await assertSucceeds(
+    configRef.set({
+      maintenanceMode: false,
+      strictTorRequired: true,
+      remoteTelemetryEnabled: true,
+      forceAdBlockSync: true,
+      emergencyLockdown: false,
+      maintenanceBanner: "All privacy relays operational.",
+      updatedByUid: BOOTSTRAP_UID,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // 5. DB-registry admin can read and update admin_config, cannot delete
+  await assertSucceeds(registryAdminDb.collection("admin_config").doc("global_settings").get());
+  await assertSucceeds(
+    registryAdminDb.collection("admin_config").doc("global_settings").update({
+      maintenanceMode: true,
+      maintenanceBanner: "Scheduled Tor bridge rotation.",
+      updatedByUid: ADMIN_UID,
+      updatedAt: new Date(),
+    })
+  );
+  await assertFails(registryAdminDb.collection("admin_config").doc("global_settings").delete());
+
+  // 6. Registry admin can create, list, update, and delete maintenance logs; bad category rejected
+  const logRef = registryAdminDb.collection("maintenance_logs").doc("log_001");
+  await assertSucceeds(
+    logRef.set({
+      action: "Enabled Maintenance Mode",
+      category: "MAINTENANCE",
+      severity: "WARN",
+      details: "Rotating v3 onion directory mirrors.",
+      actorUid: ADMIN_UID,
+      actorEmail: "secops@onionshield.org",
+      clientTimestampMs: 1700000001000,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  await assertSucceeds(registryAdminDb.collection("maintenance_logs").orderBy("createdAt", "desc").get());
+  await assertSucceeds(
+    logRef.update({
+      details: "Mirror rotation complete.",
+      severity: "INFO",
+      updatedAt: new Date(),
+    })
+  );
+  await assertFails(
+    registryAdminDb.collection("maintenance_logs").doc("log_bad").set({
+      action: "Bad",
+      category: "UNKNOWN",
+      severity: "INFO",
+      details: "",
+      actorUid: ADMIN_UID,
+      actorEmail: "secops@onionshield.org",
+      clientTimestampMs: 1700000002000,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  await assertSucceeds(logRef.delete());
+});

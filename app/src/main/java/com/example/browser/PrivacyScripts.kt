@@ -63,8 +63,14 @@ object PrivacyScripts {
         mode: BrowserMode = BrowserMode.SURFACE,
         enableCosmeticAdBlock: Boolean = false,
         enablePopupGuard: Boolean = false,
+        enableBackgroundMediaPlayback: Boolean = true,
     ): String {
-        if (!enableWebRtcGuard && !enableFingerprintRandomization && !enableCosmeticAdBlock && !enablePopupGuard) {
+        if (!enableWebRtcGuard &&
+            !enableFingerprintRandomization &&
+            !enableCosmeticAdBlock &&
+            !enablePopupGuard &&
+            !enableBackgroundMediaPlayback
+        ) {
             return ""
         }
         val profile = profileForSeed(seed, mode)
@@ -187,6 +193,171 @@ object PrivacyScripts {
                     } catch (e) {}
                     """.trimIndent()
                 )
+            }
+            if (enableBackgroundMediaPlayback) {
+                append(
+                    """
+                    try {
+                      window.__osBgMediaEnabled = true;
+                      if (!window.__osBgMediaGuardInstalled) {
+                        window.__osBgMediaGuardInstalled = true;
+                        window.__osLastUserTapMs = 0;
+                        window.__osNativePaused = false;
+
+                        const forceVisibleProps = function(target) {
+                          if (!target) return;
+                          try {
+                            Object.defineProperty(target, 'hidden', { get: function() { return window.__osBgMediaEnabled ? false : false; }, configurable: true });
+                          } catch (_) {}
+                          try {
+                            Object.defineProperty(target, 'webkitHidden', { get: function() { return false; }, configurable: true });
+                          } catch (_) {}
+                          try {
+                            Object.defineProperty(target, 'mozHidden', { get: function() { return false; }, configurable: true });
+                          } catch (_) {}
+                          try {
+                            Object.defineProperty(target, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+                          } catch (_) {}
+                          try {
+                            Object.defineProperty(target, 'webkitVisibilityState', { get: function() { return 'visible'; }, configurable: true });
+                          } catch (_) {}
+                        };
+                        forceVisibleProps(Document.prototype);
+                        forceVisibleProps(document);
+
+                        const blockedVisibilityEvents = {
+                          visibilitychange: true,
+                          webkitvisibilitychange: true,
+                          mozvisibilitychange: true,
+                          msvisibilitychange: true,
+                          pagehide: true,
+                          freeze: true
+                        };
+                        const origAddEventListener = EventTarget.prototype.addEventListener;
+                        EventTarget.prototype.addEventListener = function(type, listener, options) {
+                          if (window.__osBgMediaEnabled &&
+                              typeof type === 'string' &&
+                              blockedVisibilityEvents[type.toLowerCase()] &&
+                              (this === document || this === window || (this && this.nodeType === 9))) {
+                            return;
+                          }
+                          return origAddEventListener.apply(this, arguments);
+                        };
+                        try {
+                          Object.defineProperty(document, 'onvisibilitychange', { get: function() { return null; }, set: function() {}, configurable: true });
+                          Object.defineProperty(window, 'onpagehide', { get: function() { return null; }, set: function() {}, configurable: true });
+                        } catch (_) {}
+
+                        const markUserInteraction = function(ev) {
+                          if (!ev || ev.isTrusted !== false) {
+                            window.__osLastUserTapMs = Date.now();
+                          }
+                        };
+                        ['pointerdown', 'touchstart', 'mousedown', 'click', 'keydown'].forEach(function(evtName) {
+                          origAddEventListener.call(document, evtName, markUserInteraction, true);
+                        });
+
+                        const hasAnyActiveMedia = function() {
+                          const list = document.querySelectorAll('video, audio');
+                          for (let i = 0; i < list.length; i++) {
+                            const m = list[i];
+                            if (!m.paused && !m.ended) return true;
+                          }
+                          return false;
+                        };
+                        const notifyPlaying = function() {
+                          try {
+                            if (window.OnionShieldMediaBridge && window.OnionShieldMediaBridge.onMediaPlaying) {
+                              window.OnionShieldMediaBridge.onMediaPlaying(document.title || location.hostname || 'Media');
+                            }
+                          } catch (_) {}
+                        };
+                        const notifyStopped = function() {
+                          try {
+                            if (!hasAnyActiveMedia() && window.OnionShieldMediaBridge && window.OnionShieldMediaBridge.onMediaStopped) {
+                              window.OnionShieldMediaBridge.onMediaStopped();
+                            }
+                          } catch (_) {}
+                        };
+
+                        origAddEventListener.call(document, 'play', function(ev) {
+                          const el = ev && ev.target;
+                          if (el && (el.tagName === 'VIDEO' || el.tagName === 'AUDIO')) {
+                            el.__osUserWantsPlay = true;
+                            notifyPlaying();
+                          }
+                        }, true);
+
+                        origAddEventListener.call(document, 'playing', function(ev) {
+                          const el = ev && ev.target;
+                          if (el && (el.tagName === 'VIDEO' || el.tagName === 'AUDIO')) {
+                            el.__osUserWantsPlay = true;
+                            notifyPlaying();
+                          }
+                        }, true);
+
+                        origAddEventListener.call(document, 'ended', function(ev) {
+                          const el = ev && ev.target;
+                          if (el && (el.tagName === 'VIDEO' || el.tagName === 'AUDIO')) {
+                            el.__osUserWantsPlay = false;
+                            setTimeout(notifyStopped, 250);
+                          }
+                        }, true);
+
+                        origAddEventListener.call(document, 'pause', function(ev) {
+                          const el = ev && ev.target;
+                          if (!el || (el.tagName !== 'VIDEO' && el.tagName !== 'AUDIO')) return;
+                          const msSinceTap = Date.now() - (window.__osLastUserTapMs || 0);
+                          if (!window.__osBgMediaEnabled || window.__osNativePaused || el.ended || msSinceTap <= 1400) {
+                            el.__osUserWantsPlay = false;
+                            notifyStopped();
+                            return;
+                          }
+                          if (el.__osUserWantsPlay) {
+                            [60, 220, 550].forEach(function(delayMs) {
+                              setTimeout(function() {
+                                if (window.__osBgMediaEnabled && el.__osUserWantsPlay && el.paused && !el.ended) {
+                                  try {
+                                    const p = el.play();
+                                    if (p && p.catch) p.catch(function() {});
+                                  } catch (_) {}
+                                }
+                              }, delayMs);
+                            });
+                          }
+                        }, true);
+
+                        window.__osBgMediaResumeIfNeeded = function() {
+                          if (!window.__osBgMediaEnabled) return;
+                          const list = document.querySelectorAll('video, audio');
+                          for (let i = 0; i < list.length; i++) {
+                            const el = list[i];
+                            if (el.__osUserWantsPlay && el.paused && !el.ended) {
+                              try {
+                                const p = el.play();
+                                if (p && p.catch) p.catch(function() {});
+                              } catch (_) {}
+                            }
+                          }
+                        };
+
+                        window.__osBgMediaPauseAll = function() {
+                          window.__osNativePaused = true;
+                          const list = document.querySelectorAll('video, audio');
+                          for (let i = 0; i < list.length; i++) {
+                            const el = list[i];
+                            el.__osUserWantsPlay = false;
+                            try { el.pause(); } catch (_) {}
+                          }
+                          notifyStopped();
+                          setTimeout(function() { window.__osNativePaused = false; }, 250);
+                        };
+                      }
+                    } catch (e) {}
+                    """.trimIndent()
+                )
+            } else {
+                append(" try { window.__osBgMediaEnabled = false; } catch (e) {} ")
             }
             append(" })();")
         }

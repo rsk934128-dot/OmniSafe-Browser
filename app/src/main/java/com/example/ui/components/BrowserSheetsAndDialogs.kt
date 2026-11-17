@@ -40,6 +40,7 @@ import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material.icons.rounded.InstallMobile
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
@@ -249,6 +250,7 @@ fun QuickShieldSheet(
     onToggleSiteAdBlockWhitelist: () -> Unit = {},
     onToggleThirdPartyCookies: (Boolean) -> Unit,
     onToggleBackgroundLiveService: (Boolean) -> Unit = {},
+    onToggleBackgroundMedia: (Boolean) -> Unit = {},
     onRotateSeed: () -> Unit,
     onOpenCircuitDiagnostics: () -> Unit = {},
     onOpenFullSettings: () -> Unit,
@@ -413,6 +415,15 @@ fun QuickShieldSheet(
                         onToggleBackgroundLiveService(true)
                     }
                 },
+            )
+            ShieldSwitchRow(
+                title = "Background YouTube & Media",
+                subtitle = "Keep video songs & audio playing when exiting or minimizing the app",
+                icon = Icons.Rounded.PlayCircle,
+                checked = config.backgroundMediaPlaybackEnabled,
+                accent = shieldColors.secureGreen,
+                modifier = Modifier.testTag("sheet_background_media_switch"),
+                onCheckedChange = onToggleBackgroundMedia,
             )
 
             OutlinedButton(

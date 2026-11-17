@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.CodeOff
 import androidx.compose.material.icons.rounded.DarkMode
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Https
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
@@ -87,6 +89,7 @@ import com.example.ui.theme.LocalShieldColors
 fun SecuritySettingsScreen(
     uiState: BrowserUiState,
     viewModel: BrowserViewModel,
+    onOpenAdminPanel: () -> Unit = {},
     onNavigateBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -155,6 +158,22 @@ fun SecuritySettingsScreen(
                     onApplyRecommended = { viewModel.applyPrivacyPreset(maximumPrivacy = false) },
                     onApplyMaximum = { viewModel.applyPrivacyPreset(maximumPrivacy = true) },
                 )
+            }
+
+            // Admin Panel Quick Access Card
+            item {
+                OutlinedButton(
+                    onClick = onOpenAdminPanel,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 640.dp)
+                        .height(48.dp)
+                        .testTag("settings_open_admin_panel_button"),
+                ) {
+                    Icon(Icons.Rounded.AdminPanelSettings, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Open Admin Panel (Governance & Telemetry)")
+                }
             }
 
             // 2. Individual Privacy Feature Toggles Card
@@ -298,6 +317,36 @@ fun SecuritySettingsScreen(
                             switchTestTag = "setting_switch_surface_history",
                             onCheckedChange = viewModel::setSaveSurfaceHistory,
                         )
+                        SettingsSwitchItem(
+                            title = "Background YouTube & Media Audio",
+                            subtitle = "Keep video songs & HTML5 audio playing when you exit or minimize the app",
+                            icon = Icons.Rounded.PlayCircle,
+                            checked = config.backgroundMediaPlaybackEnabled,
+                            switchTestTag = "setting_switch_background_media",
+                            onCheckedChange = viewModel::setBackgroundMediaPlayback,
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                        SettingsSwitchItem(
+                            title = "Biometric App Lock",
+                            subtitle = "Require fingerprint or face unlock before opening history, bookmarks, or tabs",
+                            icon = Icons.Rounded.Fingerprint,
+                            checked = config.biometricAppLockEnabled,
+                            switchTestTag = "setting_switch_biometric_app_lock",
+                            onCheckedChange = viewModel::setBiometricAppLockEnabled,
+                        )
+                        if (config.biometricAppLockEnabled) {
+                            OutlinedButton(
+                                onClick = viewModel::lockAppNow,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("setting_lock_app_now_button"),
+                            ) {
+                                Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Lock App Now")
+                            }
+                        }
                     }
                 }
             }

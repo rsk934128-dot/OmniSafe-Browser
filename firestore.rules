@@ -21,6 +21,13 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email == 'monikhoku88@gmail.com' && request.auth.token.email_verified == true)
+      );
+    }
+
     function isNumber(val) {
       return val is int || val is float;
     }
@@ -120,6 +127,45 @@ service cloud.firestore {
         data.updatedAt <= request.time;
     }
 
+    function isValidAdminConfig(data) {
+      return data.maintenanceMode is bool &&
+        data.strictTorRequired is bool &&
+        data.remoteTelemetryEnabled is bool &&
+        data.forceAdBlockSync is bool &&
+        data.emergencyLockdown is bool &&
+        data.maintenanceBanner is string &&
+        data.maintenanceBanner.size() <= 240 &&
+        data.updatedByUid is string &&
+        data.updatedByUid == request.auth.uid &&
+        data.createdAt is timestamp &&
+        data.createdAt <= request.time &&
+        data.updatedAt is timestamp &&
+        data.updatedAt <= request.time;
+    }
+
+    function isValidMaintenanceLog(data) {
+      return data.action is string &&
+        data.action.size() >= 1 &&
+        data.action.size() <= 120 &&
+        data.category is string &&
+        data.category in ['CONFIG', 'SECURITY', 'TOR_NETWORK', 'MAINTENANCE', 'AUDIT'] &&
+        data.severity is string &&
+        data.severity in ['INFO', 'WARN', 'CRITICAL'] &&
+        data.details is string &&
+        data.details.size() <= 500 &&
+        data.actorUid is string &&
+        data.actorUid.size() >= 1 &&
+        data.actorUid.size() <= 128 &&
+        data.actorEmail is string &&
+        data.actorEmail.size() <= 160 &&
+        data.clientTimestampMs is int &&
+        data.clientTimestampMs >= 0 &&
+        data.createdAt is timestamp &&
+        data.createdAt <= request.time &&
+        data.updatedAt is timestamp &&
+        data.updatedAt <= request.time;
+    }
+
     match /users/{userId}/synced_links/{linkId} {
       allow get: if isSignedIn() && request.auth.uid == userId && isValidId(linkId);
       allow list: if isSignedIn() && request.auth.uid == userId;
@@ -208,6 +254,72 @@ service cloud.firestore {
         ]);
 
       allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(roundId);
+    }
+
+    match /admins/{adminUid} {
+      allow get: if isSignedIn() && (request.auth.uid == adminUid || isAdmin()) && isValidId(adminUid);
+      allow list: if isAdmin();
+      allow write: if false;
+    }
+
+    match /admin_config/{configId} {
+      allow get: if isAdmin() && isValidId(configId);
+      allow list: if isAdmin();
+
+      allow create: if isAdmin() &&
+        isValidId(configId) &&
+        incoming().keys().hasAll([
+          'maintenanceMode', 'strictTorRequired', 'remoteTelemetryEnabled',
+          'forceAdBlockSync', 'emergencyLockdown', 'maintenanceBanner',
+          'updatedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'maintenanceMode', 'strictTorRequired', 'remoteTelemetryEnabled',
+          'forceAdBlockSync', 'emergencyLockdown', 'maintenanceBanner',
+          'updatedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidAdminConfig(incoming());
+
+      allow update: if isAdmin() &&
+        isValidId(configId) &&
+        isValidAdminConfig(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'maintenanceMode', 'strictTorRequired', 'remoteTelemetryEnabled',
+          'forceAdBlockSync', 'emergencyLockdown', 'maintenanceBanner',
+          'updatedByUid', 'updatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    match /maintenance_logs/{logId} {
+      allow get: if isAdmin() && isValidId(logId);
+      allow list: if isAdmin();
+
+      allow create: if isAdmin() &&
+        isValidId(logId) &&
+        incoming().keys().hasAll([
+          'action', 'category', 'severity', 'details',
+          'actorUid', 'actorEmail', 'clientTimestampMs', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'action', 'category', 'severity', 'details',
+          'actorUid', 'actorEmail', 'clientTimestampMs', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().actorUid == request.auth.uid &&
+        isValidMaintenanceLog(incoming());
+
+      allow update: if isAdmin() &&
+        isValidId(logId) &&
+        isValidMaintenanceLog(incoming()) &&
+        incoming().actorUid == existing().actorUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'action', 'category', 'severity', 'details', 'updatedAt'
+        ]);
+
+      allow delete: if isAdmin() && isValidId(logId);
     }
   }
 }

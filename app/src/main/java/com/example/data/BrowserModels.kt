@@ -180,6 +180,8 @@ data class SecurityConfig(
     val sessionCurrencyLabel: String = "BDT",
     val liveCloudMonitorSyncEnabled: Boolean = false,
     val backgroundLiveServiceEnabled: Boolean = false,
+    val backgroundMediaPlaybackEnabled: Boolean = true,
+    val biometricAppLockEnabled: Boolean = true,
 ) {
     val torEndpoint: String
         get() = "${torProxyProtocol.scheme}://$torProxyHost:$torProxyPort"

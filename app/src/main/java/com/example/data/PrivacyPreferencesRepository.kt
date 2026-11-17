@@ -53,6 +53,8 @@ class PrivacyPreferencesRepository(private val context: Context) {
         val SESSION_CURRENCY_LABEL = stringPreferencesKey("session_currency_label")
         val LIVE_CLOUD_MONITOR_SYNC = booleanPreferencesKey("live_cloud_monitor_sync")
         val BACKGROUND_LIVE_SERVICE = booleanPreferencesKey("background_live_service")
+        val BACKGROUND_MEDIA_PLAYBACK = booleanPreferencesKey("background_media_playback")
+        val BIOMETRIC_APP_LOCK = booleanPreferencesKey("biometric_app_lock_enabled")
     }
 
     val securityConfig: Flow<SecurityConfig> = context.privacyDataStore.data.map { prefs ->
@@ -97,6 +99,8 @@ class PrivacyPreferencesRepository(private val context: Context) {
             sessionCurrencyLabel = prefs[Keys.SESSION_CURRENCY_LABEL] ?: "BDT",
             liveCloudMonitorSyncEnabled = prefs[Keys.LIVE_CLOUD_MONITOR_SYNC] ?: false,
             backgroundLiveServiceEnabled = prefs[Keys.BACKGROUND_LIVE_SERVICE] ?: false,
+            backgroundMediaPlaybackEnabled = prefs[Keys.BACKGROUND_MEDIA_PLAYBACK] ?: true,
+            biometricAppLockEnabled = prefs[Keys.BIOMETRIC_APP_LOCK] ?: true,
         )
     }
 
@@ -318,5 +322,13 @@ class PrivacyPreferencesRepository(private val context: Context) {
 
     suspend fun setBackgroundLiveService(enabled: Boolean) {
         context.privacyDataStore.edit { it[Keys.BACKGROUND_LIVE_SERVICE] = enabled }
+    }
+
+    suspend fun setBackgroundMediaPlayback(enabled: Boolean) {
+        context.privacyDataStore.edit { it[Keys.BACKGROUND_MEDIA_PLAYBACK] = enabled }
+    }
+
+    suspend fun setBiometricAppLockEnabled(enabled: Boolean) {
+        context.privacyDataStore.edit { it[Keys.BIOMETRIC_APP_LOCK] = enabled }
     }
 }

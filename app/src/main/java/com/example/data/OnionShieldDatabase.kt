@@ -16,8 +16,9 @@ import kotlinx.coroutines.flow.Flow
         VaultEntryEntity::class,
         PinnedAppEntity::class,
         SessionRoundLogEntity::class,
+        EncryptedSearchHistoryEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class OnionShieldDatabase : RoomDatabase() {
@@ -27,6 +28,7 @@ abstract class OnionShieldDatabase : RoomDatabase() {
     abstract fun vaultDao(): VaultDao
     abstract fun pinnedAppDao(): PinnedAppDao
     abstract fun sessionRoundLogDao(): SessionRoundLogDao
+    abstract fun searchHistoryDao(): SearchHistoryDao
 
     companion object {
         @Volatile
@@ -86,13 +88,38 @@ abstract class OnionShieldDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `encrypted_search_history` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `queryHash` TEXT NOT NULL,
+                        `queryCiphertext` TEXT NOT NULL,
+                        `resolvedUrlCiphertext` TEXT NOT NULL,
+                        `isOnion` INTEGER NOT NULL,
+                        `lastSearchedAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS `index_encrypted_search_history_queryHash`
+                    ON `encrypted_search_history` (`queryHash`)
+                    """.trimIndent(),
+                )
+            }
+        }
+
         fun getInstance(context: Context): OnionShieldDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     OnionShieldDatabase::class.java,
                     "onionshield_local.db",
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .build()
+                    .also { INSTANCE = it }
             }
         }
     }

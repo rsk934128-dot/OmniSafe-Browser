@@ -7,8 +7,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -17,6 +17,9 @@ import com.example.browser.TrackerAndUrlEngine
 import com.example.data.BrowserMode
 import com.example.ui.BrowserViewModel
 import com.example.ui.Routes
+import com.example.ui.screens.AdminPanelScreen
+import com.example.ui.screens.AdminSettingsRoute
+import com.example.ui.screens.BiometricAppLockScreen
 import com.example.ui.screens.BrowserScreen
 import com.example.ui.screens.CloudSyncRoute
 import com.example.ui.screens.DownloadsScreen
@@ -36,14 +39,16 @@ private data class ExternalLinkIntent(
 class MainActivity : FragmentActivity() {
 
     private val pendingExternalIntent = MutableStateFlow<ExternalLinkIntent?>(null)
+    private lateinit var sharedBrowserViewModel: BrowserViewModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        sharedBrowserViewModel = ViewModelProvider(this)[BrowserViewModel::class.java]
         pendingExternalIntent.value = extractExternalIntent(intent)
 
         setContent {
-            val browserViewModel: BrowserViewModel = viewModel()
+            val browserViewModel = sharedBrowserViewModel
             val uiState by browserViewModel.uiState.collectAsStateWithLifecycle()
             val isBookmarked by browserViewModel.isCurrentPageBookmarked.collectAsStateWithLifecycle()
             val bookmarks by browserViewModel.bookmarks.collectAsStateWithLifecycle()
@@ -59,9 +64,9 @@ class MainActivity : FragmentActivity() {
             val navController = rememberNavController()
             val isTorMode = uiState.securityConfig.browserMode == BrowserMode.TOR_ONION
 
-            LaunchedEffect(externalIntent) {
+            LaunchedEffect(externalIntent, uiState.isAppLocked) {
                 val target = externalIntent
-                if (target != null) {
+                if (target != null && !uiState.isAppLocked) {
                     if (target.isSharedAction) {
                         browserViewModel.showLinkActionSheet(
                             url = target.url,
@@ -79,10 +84,17 @@ class MainActivity : FragmentActivity() {
                 isTorMode = isTorMode,
                 darkTheme = true,
             ) {
-                NavHost(
-                    navController = navController,
-                    startDestination = Routes.ROUTE_BROWSER,
-                ) {
+                if (uiState.isAppLocked) {
+                    BiometricAppLockScreen(
+                        isTorMode = isTorMode,
+                        isConfigLoaded = uiState.isAppLockConfigLoaded,
+                        onUnlocked = browserViewModel::unlockApp,
+                    )
+                } else {
+                    NavHost(
+                        navController = navController,
+                        startDestination = Routes.ROUTE_BROWSER,
+                    ) {
                     composable(Routes.ROUTE_BROWSER) {
                         BrowserScreen(
                             uiState = uiState,
@@ -106,6 +118,12 @@ class MainActivity : FragmentActivity() {
                             onOpenSessionGuard = {
                                 navController.navigate(Routes.ROUTE_SESSION_GUARD)
                             },
+                            onOpenAdminPanel = {
+                                navController.navigate(Routes.ROUTE_ADMIN_PANEL)
+                            },
+                            onOpenAdminSettings = {
+                                navController.navigate(Routes.ROUTE_ADMIN_SETTINGS)
+                            },
                         )
                     }
 
@@ -113,6 +131,9 @@ class MainActivity : FragmentActivity() {
                         SecuritySettingsScreen(
                             uiState = uiState,
                             viewModel = browserViewModel,
+                            onOpenAdminPanel = {
+                                navController.navigate(Routes.ROUTE_ADMIN_PANEL)
+                            },
                             onNavigateBack = { navController.popBackStack() },
                         )
                     }
@@ -197,9 +218,66 @@ class MainActivity : FragmentActivity() {
                             onNavigateBack = { navController.popBackStack() },
                         )
                     }
+
+                    composable(Routes.ROUTE_ADMIN_PANEL) {
+                        AdminPanelScreen(
+                            uiState = uiState,
+                            viewModel = browserViewModel,
+                            bookmarksCount = bookmarks.size,
+                            historyCount = history.size,
+                            downloadsCount = downloads.size,
+                            onOpenSecuritySettings = {
+                                navController.navigate(Routes.ROUTE_SHIELD_SETTINGS)
+                            },
+                            onOpenAdminSettings = {
+                                navController.navigate(Routes.ROUTE_ADMIN_SETTINGS)
+                            },
+                            onOpenCloudSync = {
+                                navController.navigate(Routes.ROUTE_CLOUD_SYNC)
+                            },
+                            onOpenSessionGuard = {
+                                navController.navigate(Routes.ROUTE_SESSION_GUARD)
+                            },
+                            onOpenVault = {
+                                navController.navigate(Routes.ROUTE_VAULT)
+                            },
+                            onNavigateBack = { navController.popBackStack() },
+                        )
+                    }
+
+                    composable(Routes.ROUTE_ADMIN_SETTINGS) {
+                        AdminSettingsRoute(
+                            onNavigateBack = { navController.popBackStack() },
+                        )
+                    }
+                    }
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (::sharedBrowserViewModel.isInitialized) {
+            sharedBrowserViewModel.onAppForegrounded()
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (::sharedBrowserViewModel.isInitialized) {
+            sharedBrowserViewModel.onAppBackgrounded()
+        }
+    }
+
+    override fun onStop() {
+        if (::sharedBrowserViewModel.isInitialized) {
+            sharedBrowserViewModel.onAppBackgrounded()
+            if (!isChangingConfigurations) {
+                sharedBrowserViewModel.lockAppIfEnabled()
+            }
+        }
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {

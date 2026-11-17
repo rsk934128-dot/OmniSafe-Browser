@@ -8,8 +8,11 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -61,6 +64,18 @@ object LiveSessionRuntime {
     private val _liveTorProxyState = MutableStateFlow<TorProxyState>(TorProxyState.Inactive)
     val liveTorProxyState: StateFlow<TorProxyState> = _liveTorProxyState.asStateFlow()
 
+    private val _isMediaPlaybackActive = MutableStateFlow(false)
+    val isMediaPlaybackActive: StateFlow<Boolean> = _isMediaPlaybackActive.asStateFlow()
+
+    private val _activeMediaTitle = MutableStateFlow("")
+    val activeMediaTitle: StateFlow<String> = _activeMediaTitle.asStateFlow()
+
+    private val _arePowerLocksHeld = MutableStateFlow(false)
+    val arePowerLocksHeld: StateFlow<Boolean> = _arePowerLocksHeld.asStateFlow()
+
+    private val _mediaControlCommands = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val mediaControlCommands: kotlinx.coroutines.flow.Flow<String> = _mediaControlCommands
+
     fun refreshElapsed(nowEpochMs: Long = System.currentTimeMillis()): Long {
         val mins = ((nowEpochMs - _sessionStartEpochMs.value) / 60_000L).coerceAtLeast(0L)
         _elapsedMinutes.value = mins
@@ -81,12 +96,26 @@ object LiveSessionRuntime {
         _activeSiteHost.value = SessionMonitorFirestoreRepository.sanitizeSiteHost(extracted)
     }
 
+    fun setMediaPlaybackState(active: Boolean, title: String = "") {
+        _isMediaPlaybackActive.value = active
+        _activeMediaTitle.value = if (active) title.trim().take(80) else ""
+    }
+
+    internal fun emitMediaCommand(command: String) {
+        _mediaControlCommands.tryEmit(command)
+    }
+
     internal fun setForegroundRunning(running: Boolean) {
         _isForegroundServiceRunning.value = running
         if (!running) {
             _foregroundSyncStatus.value = SessionMonitorSyncStatus.Disabled
             _liveTorProxyState.value = TorProxyState.Inactive
+            _arePowerLocksHeld.value = false
         }
+    }
+
+    internal fun setPowerLocksHeld(held: Boolean) {
+        _arePowerLocksHeld.value = held
     }
 
     internal fun updateForegroundSyncStatus(status: SessionMonitorSyncStatus) {
@@ -113,10 +142,18 @@ class LiveMonitorForegroundService : Service() {
     private var syncStatusForwardJob: Job? = null
     private var syncService: SessionMonitorSyncService? = null
 
+    private var mediaStateJob: Job? = null
+
+    private val wakeLockGuard = Any()
+    private var partialWakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
     private var latestStats: SessionGuardStats = SessionGuardStats()
     private var latestConfig: SecurityConfig = SecurityConfig()
     private var latestSyncStatus: SessionMonitorSyncStatus = SessionMonitorSyncStatus.Disabled
     private var latestTorState: TorProxyState = TorProxyState.Inactive
+    private var latestMediaActive: Boolean = false
+    private var latestMediaTitle: String = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -126,22 +163,34 @@ class LiveMonitorForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        latestMediaActive = LiveSessionRuntime.isMediaPlaybackActive.value
+        latestMediaTitle = LiveSessionRuntime.activeMediaTitle.value
         when (intent?.action) {
             ACTION_STOP -> {
                 stopAndClearPreference()
                 return START_NOT_STICKY
             }
+            ACTION_PAUSE_MEDIA -> {
+                LiveSessionRuntime.emitMediaCommand(CMD_PAUSE_MEDIA)
+                LiveSessionRuntime.setMediaPlaybackState(false)
+                latestMediaActive = false
+                latestMediaTitle = ""
+                promoteToForeground(buildNotification(latestStats, latestConfig, latestSyncStatus, latestTorState, false, ""))
+                return START_STICKY
+            }
             ACTION_NEW_CIRCUIT -> {
-                promoteToForeground(buildNotification(latestStats, latestConfig, latestSyncStatus, latestTorState))
+                promoteToForeground(buildNotification(latestStats, latestConfig, latestSyncStatus, latestTorState, latestMediaActive, latestMediaTitle))
                 LiveSessionRuntime.setForegroundRunning(true)
+                acquireWakeAndWifiLocks()
                 startMonitoringLoopsIfNeeded()
                 triggerNewTorCircuit()
                 return START_STICKY
             }
             else -> {
                 // Immediately promote to foreground within Android 14+ startup deadline
-                promoteToForeground(buildNotification(latestStats, latestConfig, latestSyncStatus, latestTorState))
+                promoteToForeground(buildNotification(latestStats, latestConfig, latestSyncStatus, latestTorState, latestMediaActive, latestMediaTitle))
                 LiveSessionRuntime.setForegroundRunning(true)
+                acquireWakeAndWifiLocks()
                 startMonitoringLoopsIfNeeded()
                 return START_STICKY
             }
@@ -249,11 +298,24 @@ class LiveMonitorForegroundService : Service() {
             }
         }
 
+        if (mediaStateJob == null) {
+            mediaStateJob = scope.launch {
+                combine(
+                    LiveSessionRuntime.isMediaPlaybackActive,
+                    LiveSessionRuntime.activeMediaTitle,
+                ) { active, title -> active to title }.collectLatest { (active, title) ->
+                    latestMediaActive = active
+                    latestMediaTitle = title
+                    updateNotification(buildNotification(latestStats, latestConfig, latestSyncStatus, latestTorState, active, title))
+                }
+            }
+        }
+
         monitoringJob = scope.launch {
             statsFlow.collectLatest { (cfg, stats) ->
                 latestConfig = cfg
                 latestStats = stats
-                updateNotification(buildNotification(stats, cfg, latestSyncStatus, latestTorState))
+                updateNotification(buildNotification(stats, cfg, latestSyncStatus, latestTorState, latestMediaActive, latestMediaTitle))
             }
         }
     }
@@ -295,10 +357,13 @@ class LiveMonitorForegroundService : Service() {
 
     private fun stopAndClearPreference() {
         LiveSessionRuntime.setForegroundRunning(false)
+        releaseWakeAndWifiLocks()
         tickerJob?.cancel()
         tickerJob = null
         torKeepAliveJob?.cancel()
         torKeepAliveJob = null
+        mediaStateJob?.cancel()
+        mediaStateJob = null
         monitoringJob?.cancel()
         monitoringJob = null
         syncStatusForwardJob?.cancel()
@@ -318,8 +383,10 @@ class LiveMonitorForegroundService : Service() {
 
     override fun onDestroy() {
         LiveSessionRuntime.setForegroundRunning(false)
+        releaseWakeAndWifiLocks()
         tickerJob?.cancel()
         torKeepAliveJob?.cancel()
+        mediaStateJob?.cancel()
         monitoringJob?.cancel()
         syncStatusForwardJob?.cancel()
         syncService?.stop()
@@ -328,9 +395,84 @@ class LiveMonitorForegroundService : Service() {
         super.onDestroy()
     }
 
+    internal fun acquireWakeAndWifiLocks() {
+        synchronized(wakeLockGuard) {
+            runCatching {
+                val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                if (powerManager != null) {
+                    val lock = partialWakeLock ?: powerManager.newWakeLock(
+                        PowerManager.PARTIAL_WAKE_LOCK,
+                        PARTIAL_WAKE_LOCK_TAG,
+                    ).apply {
+                        setReferenceCounted(false)
+                    }.also { partialWakeLock = it }
+                    if (!lock.isHeld) {
+                        lock.acquire()
+                    }
+                }
+            }.onFailure { err ->
+                Log.w(TAG, "Unable to acquire PartialWakeLock", err)
+            }
+
+            runCatching {
+                val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                if (wifiManager != null) {
+                    val wifiMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                    } else {
+                        @Suppress("DEPRECATION")
+                        WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                    }
+                    val lock = wifiLock ?: wifiManager.createWifiLock(wifiMode, WIFI_LOCK_TAG).apply {
+                        setReferenceCounted(false)
+                    }.also { wifiLock = it }
+                    if (!lock.isHeld) {
+                        lock.acquire()
+                    }
+                }
+            }.onFailure { err ->
+                Log.w(TAG, "Unable to acquire WifiLock", err)
+            }
+
+            LiveSessionRuntime.setPowerLocksHeld(
+                (partialWakeLock?.isHeld == true) || (wifiLock?.isHeld == true),
+            )
+        }
+    }
+
+    internal fun releaseWakeAndWifiLocks() {
+        synchronized(wakeLockGuard) {
+            runCatching {
+                if (partialWakeLock?.isHeld == true) {
+                    partialWakeLock?.release()
+                }
+            }.onFailure { err ->
+                Log.w(TAG, "Failed releasing PartialWakeLock", err)
+            }
+            runCatching {
+                if (wifiLock?.isHeld == true) {
+                    wifiLock?.release()
+                }
+            }.onFailure { err ->
+                Log.w(TAG, "Failed releasing WifiLock", err)
+            }
+            partialWakeLock = null
+            wifiLock = null
+            LiveSessionRuntime.setPowerLocksHeld(false)
+        }
+    }
+
+    internal fun isPartialWakeLockHeld(): Boolean = synchronized(wakeLockGuard) {
+        partialWakeLock?.isHeld == true
+    }
+
+    internal fun isWifiLockHeld(): Boolean = synchronized(wakeLockGuard) {
+        wifiLock?.isHeld == true
+    }
+
     private fun promoteToForeground(notification: Notification) {
         val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
         } else {
             0
         }
@@ -365,6 +507,8 @@ class LiveMonitorForegroundService : Service() {
         config: SecurityConfig,
         syncStatus: SessionMonitorSyncStatus,
         torState: TorProxyState = TorProxyState.Inactive,
+        isMediaActive: Boolean = false,
+        mediaTitle: String = "",
     ): Notification {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -406,6 +550,10 @@ class LiveMonitorForegroundService : Service() {
         }
 
         val summaryLine = buildString {
+            if (isMediaActive) {
+                val trackLabel = mediaTitle.ifBlank { "Background Media Audio" }
+                append("♪ $trackLabel • ")
+            }
             append(torSummary)
             append(" • ${stats.elapsedMinutes}m active")
             if (stats.totalRounds > 0) {
@@ -414,20 +562,36 @@ class LiveMonitorForegroundService : Service() {
             append(" • $cloudLabel")
         }
 
+        val titleRes = when {
+            isMediaActive -> R.string.live_monitor_notif_media_title
+            isTorMode -> R.string.live_monitor_notif_tor_title
+            else -> R.string.live_monitor_notif_title
+        }
+
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_shield_notify)
-            .setContentTitle(
-                getString(
-                    if (isTorMode) R.string.live_monitor_notif_tor_title else R.string.live_monitor_notif_title,
-                ),
-            )
+            .setContentTitle(getString(titleRes))
             .setContentText(summaryLine)
             .setStyle(NotificationCompat.BigTextStyle().bigText(summaryLine))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setCategory(
+                if (isMediaActive) NotificationCompat.CATEGORY_TRANSPORT else NotificationCompat.CATEGORY_SERVICE,
+            )
             .setContentIntent(openPendingIntent)
             .addAction(0, getString(R.string.live_monitor_stop_action), stopPendingIntent)
+
+        if (isMediaActive) {
+            val pauseMediaIntent = Intent(this, LiveMonitorForegroundService::class.java)
+                .setAction(ACTION_PAUSE_MEDIA)
+            val pauseMediaPendingIntent = PendingIntent.getService(
+                this,
+                REQUEST_CODE_PAUSE_MEDIA,
+                pauseMediaIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(0, getString(R.string.live_monitor_pause_media_action), pauseMediaPendingIntent)
+        }
 
         if (isTorMode) {
             val newCircuitIntent = Intent(this, LiveMonitorForegroundService::class.java)
@@ -450,9 +614,15 @@ class LiveMonitorForegroundService : Service() {
         const val ACTION_START = "com.example.action.START_LIVE_MONITOR"
         const val ACTION_STOP = "com.example.action.STOP_LIVE_MONITOR"
         const val ACTION_NEW_CIRCUIT = "com.example.action.NEW_TOR_CIRCUIT"
+        const val ACTION_PAUSE_MEDIA = "com.example.action.PAUSE_MEDIA"
+        const val CMD_PAUSE_MEDIA = "PAUSE_MEDIA"
+        private const val TAG = "LiveMonitorFGS"
+        private const val PARTIAL_WAKE_LOCK_TAG = "OnionShield:MediaStreamWakeLock"
+        private const val WIFI_LOCK_TAG = "OnionShield:MediaStreamWifiLock"
         private const val REQUEST_CODE_OPEN = 100
         private const val REQUEST_CODE_STOP = 101
         private const val REQUEST_CODE_NEW_CIRCUIT = 102
+        private const val REQUEST_CODE_PAUSE_MEDIA = 103
 
         fun start(context: Context) {
             val intent = Intent(context, LiveMonitorForegroundService::class.java).setAction(ACTION_START)

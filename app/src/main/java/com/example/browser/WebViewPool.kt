@@ -13,6 +13,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
+import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.URLUtil
@@ -55,7 +56,9 @@ class WebViewPool(
     private val pool = mutableMapOf<String, WebView>()
     private val contextWrappers = mutableMapOf<String, MutableContextWrapper>()
     private val tabCurrentUrls = ConcurrentHashMap<String, String>()
+    private val playingMediaTabs = ConcurrentHashMap<String, String>()
     private val softwareLayerTabs = mutableSetOf<String>()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var currentConfig: SecurityConfig = SecurityConfig()
 
     fun updateSecurityConfig(config: SecurityConfig) {
@@ -63,6 +66,7 @@ class WebViewPool(
         pool.forEach { (tabId, webView) ->
             val seed = (webView.tag as? String) ?: "DEFAULT"
             applySettingsToWebView(tabId, webView, config, seed)
+            injectHardeningScript(tabId, webView, tabCurrentUrls[tabId].orEmpty(), seed)
         }
     }
 
@@ -98,6 +102,8 @@ class WebViewPool(
 
     fun destroyTabWebView(tabId: String) {
         tabCurrentUrls.remove(tabId)
+        playingMediaTabs.remove(tabId)
+        syncGlobalMediaRuntime()
         softwareLayerTabs.remove(tabId)
         contextWrappers.remove(tabId)?.baseContext = appContext
         pool.remove(tabId)?.let { wv ->
@@ -107,6 +113,84 @@ class WebViewPool(
                 wv.clearHistory()
                 wv.destroy()
             }
+        }
+    }
+
+    fun onAppBackgrounded(keepMediaAlive: Boolean) {
+        if (!keepMediaAlive) return
+        mainHandler.post {
+            pool.values.forEach { wv ->
+                runCatching {
+                    wv.onResume()
+                    wv.resumeTimers()
+                    wv.evaluateJavascript("window.__osBgMediaResumeIfNeeded && window.__osBgMediaResumeIfNeeded();", null)
+                }
+            }
+        }
+        listOf(150L, 450L, 900L).forEach { delayMs ->
+            mainHandler.postDelayed({
+                pool.values.forEach { wv ->
+                    runCatching {
+                        wv.onResume()
+                        wv.resumeTimers()
+                        wv.evaluateJavascript("window.__osBgMediaResumeIfNeeded && window.__osBgMediaResumeIfNeeded();", null)
+                    }
+                }
+            }, delayMs)
+        }
+    }
+
+    fun onAppForegrounded() {
+        mainHandler.post {
+            pool.values.forEach { wv ->
+                runCatching {
+                    wv.onResume()
+                    wv.resumeTimers()
+                }
+            }
+        }
+    }
+
+    fun pauseAllMedia() {
+        playingMediaTabs.clear()
+        syncGlobalMediaRuntime()
+        mainHandler.post {
+            pool.values.forEach { wv ->
+                runCatching {
+                    wv.evaluateJavascript("window.__osBgMediaPauseAll && window.__osBgMediaPauseAll();", null)
+                }
+            }
+        }
+    }
+
+    private fun syncGlobalMediaRuntime() {
+        val activeEntry = playingMediaTabs.values.firstOrNull()
+        if (activeEntry != null) {
+            LiveSessionRuntime.setMediaPlaybackState(true, activeEntry)
+        } else {
+            LiveSessionRuntime.setMediaPlaybackState(false)
+        }
+    }
+
+    private fun injectHardeningScript(
+        tabId: String,
+        webView: WebView?,
+        url: String,
+        seed: String,
+    ) {
+        if (webView == null || isJsDisabledForTab(tabId, currentConfig, url)) return
+        val siteAllowed = TrackerAndUrlEngine.isSiteWhitelisted(url, currentConfig.adBlockWhitelistHosts)
+        val script = PrivacyScripts.buildHardeningScript(
+            seed = (webView.tag as? String) ?: seed,
+            enableWebRtcGuard = currentConfig.webRtcLeakProtectionEnabled,
+            enableFingerprintRandomization = currentConfig.fingerprintRandomizationEnabled,
+            mode = currentConfig.browserMode,
+            enableCosmeticAdBlock = currentConfig.trackerBlockerEnabled && currentConfig.cosmeticAdBlockEnabled && !siteAllowed,
+            enablePopupGuard = currentConfig.popupBlockerEnabled && !siteAllowed,
+            enableBackgroundMediaPlayback = currentConfig.backgroundMediaPlaybackEnabled,
+        )
+        if (script.isNotEmpty()) {
+            webView.evaluateJavascript(script, null)
         }
     }
 
@@ -127,6 +211,8 @@ class WebViewPool(
             }
         }
         pool.clear()
+        playingMediaTabs.clear()
+        syncGlobalMediaRuntime()
         contextWrappers.values.forEach { it.baseContext = appContext }
         contextWrappers.clear()
         tabCurrentUrls.clear()
@@ -158,6 +244,23 @@ class WebViewPool(
             if (softwareLayerTabs.contains(tabId)) {
                 setLayerType(View.LAYER_TYPE_SOFTWARE, null)
             }
+            addJavascriptInterface(
+                object {
+                    @JavascriptInterface
+                    fun onMediaPlaying(title: String?) {
+                        val cleanTitle = title?.trim().orEmpty().ifBlank { "Media Audio" }
+                        playingMediaTabs[tabId] = cleanTitle
+                        syncGlobalMediaRuntime()
+                    }
+
+                    @JavascriptInterface
+                    fun onMediaStopped() {
+                        playingMediaTabs.remove(tabId)
+                        syncGlobalMediaRuntime()
+                    }
+                },
+                "OnionShieldMediaBridge",
+            )
         }
 
         applySettingsToWebView(tabId, webView, config, seed)
@@ -424,6 +527,15 @@ class WebViewPool(
                 return super.shouldInterceptRequest(view, request)
             }
 
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                val safeUrl = url.orEmpty()
+                if (safeUrl.isNotBlank()) {
+                    tabCurrentUrls[tabId] = safeUrl
+                    injectHardeningScript(tabId, view, safeUrl, seed)
+                }
+            }
+
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 val safeUrl = url.orEmpty()
                 if (safeUrl.isNotBlank()) {
@@ -433,20 +545,7 @@ class WebViewPool(
                     }
                 }
                 callbacks.onPageStarted(tabId, safeUrl)
-                if (!isJsDisabledForTab(tabId, currentConfig, safeUrl)) {
-                    val siteAllowed = TrackerAndUrlEngine.isSiteWhitelisted(safeUrl, currentConfig.adBlockWhitelistHosts)
-                    val script = PrivacyScripts.buildHardeningScript(
-                        seed = (view?.tag as? String) ?: seed,
-                        enableWebRtcGuard = currentConfig.webRtcLeakProtectionEnabled,
-                        enableFingerprintRandomization = currentConfig.fingerprintRandomizationEnabled,
-                        mode = currentConfig.browserMode,
-                        enableCosmeticAdBlock = currentConfig.trackerBlockerEnabled && currentConfig.cosmeticAdBlockEnabled && !siteAllowed,
-                        enablePopupGuard = currentConfig.popupBlockerEnabled && !siteAllowed,
-                    )
-                    if (script.isNotEmpty()) {
-                        view?.evaluateJavascript(script, null)
-                    }
-                }
+                injectHardeningScript(tabId, view, safeUrl, seed)
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -454,20 +553,7 @@ class WebViewPool(
                 if (safeUrl.isNotBlank()) {
                     tabCurrentUrls[tabId] = safeUrl
                 }
-                if (!isJsDisabledForTab(tabId, currentConfig, safeUrl)) {
-                    val siteAllowed = TrackerAndUrlEngine.isSiteWhitelisted(safeUrl, currentConfig.adBlockWhitelistHosts)
-                    val script = PrivacyScripts.buildHardeningScript(
-                        seed = (view?.tag as? String) ?: seed,
-                        enableWebRtcGuard = currentConfig.webRtcLeakProtectionEnabled,
-                        enableFingerprintRandomization = currentConfig.fingerprintRandomizationEnabled,
-                        mode = currentConfig.browserMode,
-                        enableCosmeticAdBlock = currentConfig.trackerBlockerEnabled && currentConfig.cosmeticAdBlockEnabled && !siteAllowed,
-                        enablePopupGuard = currentConfig.popupBlockerEnabled && !siteAllowed,
-                    )
-                    if (script.isNotEmpty()) {
-                        view?.evaluateJavascript(script, null)
-                    }
-                }
+                injectHardeningScript(tabId, view, safeUrl, seed)
                 callbacks.onPageFinished(
                     tabId = tabId,
                     url = safeUrl,
