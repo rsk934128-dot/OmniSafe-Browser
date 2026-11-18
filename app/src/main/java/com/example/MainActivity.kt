@@ -4,8 +4,11 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -15,6 +18,7 @@ import androidx.navigation.compose.rememberNavController
 import com.example.browser.HomeAppShortcutHelper
 import com.example.browser.TrackerAndUrlEngine
 import com.example.data.BrowserMode
+import com.example.security.configureAppCheck
 import com.example.ui.BrowserViewModel
 import com.example.ui.Routes
 import com.example.ui.screens.AdminPanelScreen
@@ -23,10 +27,12 @@ import com.example.ui.screens.BiometricAppLockScreen
 import com.example.ui.screens.BrowserScreen
 import com.example.ui.screens.CloudSyncRoute
 import com.example.ui.screens.DownloadsScreen
+import com.example.ui.screens.GeminiChatScreen
 import com.example.ui.screens.LibraryScreen
 import com.example.ui.screens.SecuritySettingsScreen
 import com.example.ui.screens.SessionGuardScreen
 import com.example.ui.screens.VaultScreen
+import com.example.ui.screens.VpnConnectScreen
 import com.example.ui.theme.OnionShieldTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 
@@ -43,6 +49,8 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Configure Firebase App Check before ViewModels, Compose UI, or any Firebase operations.
+        configureAppCheck(this, intent)
         enableEdgeToEdge()
         sharedBrowserViewModel = ViewModelProvider(this)[BrowserViewModel::class.java]
         pendingExternalIntent.value = extractExternalIntent(intent)
@@ -84,13 +92,7 @@ class MainActivity : FragmentActivity() {
                 isTorMode = isTorMode,
                 darkTheme = true,
             ) {
-                if (uiState.isAppLocked) {
-                    BiometricAppLockScreen(
-                        isTorMode = isTorMode,
-                        isConfigLoaded = uiState.isAppLockConfigLoaded,
-                        onUnlocked = browserViewModel::unlockApp,
-                    )
-                } else {
+                Box(modifier = Modifier.fillMaxSize()) {
                     NavHost(
                         navController = navController,
                         startDestination = Routes.ROUTE_BROWSER,
@@ -124,6 +126,12 @@ class MainActivity : FragmentActivity() {
                             onOpenAdminSettings = {
                                 navController.navigate(Routes.ROUTE_ADMIN_SETTINGS)
                             },
+                            onOpenVpnConnect = {
+                                navController.navigate(Routes.ROUTE_VPN_CONNECT)
+                            },
+                            onOpenGeminiAssistant = {
+                                navController.navigate(Routes.ROUTE_GEMINI_ASSISTANT)
+                            },
                         )
                     }
 
@@ -133,6 +141,9 @@ class MainActivity : FragmentActivity() {
                             viewModel = browserViewModel,
                             onOpenAdminPanel = {
                                 navController.navigate(Routes.ROUTE_ADMIN_PANEL)
+                            },
+                            onOpenAdminSettings = {
+                                navController.navigate(Routes.ROUTE_ADMIN_SETTINGS)
                             },
                             onNavigateBack = { navController.popBackStack() },
                         )
@@ -247,9 +258,47 @@ class MainActivity : FragmentActivity() {
 
                     composable(Routes.ROUTE_ADMIN_SETTINGS) {
                         AdminSettingsRoute(
+                            onApplyOverridesToLocalBrowser = { serverConfig ->
+                                browserViewModel.applyServerPrivacyOverrides(serverConfig)
+                            },
                             onNavigateBack = { navController.popBackStack() },
                         )
                     }
+
+                    composable(Routes.ROUTE_VPN_CONNECT) {
+                        val vpnStatus by browserViewModel.vpnTunnelStatus.collectAsStateWithLifecycle()
+                        VpnConnectScreen(
+                            selectedProfile = uiState.securityConfig.vpnProfile,
+                            vpnStatus = vpnStatus,
+                            onSelectProfile = browserViewModel::selectVpnProfile,
+                            onConnectAfterConsent = browserViewModel::startVpnTunnelAfterConsent,
+                            onDisconnect = browserViewModel::stopVpnTunnel,
+                            onOpenWebLink = { link ->
+                                browserViewModel.openUrlOrSearch(link)
+                                navController.popBackStack()
+                            },
+                            onNavigateBack = { navController.popBackStack() },
+                        )
+                    }
+
+                    composable(Routes.ROUTE_GEMINI_ASSISTANT) {
+                        GeminiChatScreen(
+                            activeTab = uiState.activeTab,
+                            securityConfig = uiState.securityConfig,
+                            extractPageSnippet = { tabId, callback ->
+                                browserViewModel.webViewPool.extractPageTextSnippet(tabId, callback)
+                            },
+                            onNavigateBack = { navController.popBackStack() },
+                        )
+                    }
+                    }
+
+                    if (uiState.isAppLocked) {
+                        BiometricAppLockScreen(
+                            isTorMode = isTorMode,
+                            isConfigLoaded = uiState.isAppLockConfigLoaded,
+                            onUnlocked = browserViewModel::unlockApp,
+                        )
                     }
                 }
             }

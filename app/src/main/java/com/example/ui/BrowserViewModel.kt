@@ -18,6 +18,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.browser.HomeAppShortcutHelper
 import com.example.browser.LiveMonitorForegroundService
 import com.example.browser.LiveSessionRuntime
+import com.example.browser.OnionShieldVpnService
 import com.example.browser.PrivacyScripts
 import com.example.browser.SessionGuardEngine
 import com.example.browser.SessionGuardStats
@@ -26,6 +27,7 @@ import com.example.browser.SessionMonitorSyncStatus
 import com.example.browser.TorCircuitService
 import com.example.browser.TorProxyController
 import com.example.browser.TrackerAndUrlEngine
+import com.example.browser.VpnTunnelRuntime
 import com.example.browser.WebViewEventCallbacks
 import com.example.browser.WebViewPool
 import com.example.data.ABOUT_START_URL
@@ -41,6 +43,7 @@ import com.example.data.HistoryEntity
 import com.example.data.LinkMenuTarget
 import com.example.data.OnionShieldDatabase
 import com.example.data.PendingDownloadRequest
+import com.example.data.PersistedMediaState
 import com.example.data.PinnedAppEntity
 import com.example.data.PrivacyPreferencesRepository
 import com.example.data.ProxyProtocol
@@ -51,6 +54,8 @@ import com.example.data.TorCircuitDiagnostic
 import com.example.data.TorProxyState
 import com.example.data.VaultEntryEntity
 import com.example.data.VaultEntryType
+import com.example.data.VpnServerProfile
+import com.example.data.VpnTunnelStatus
 import com.example.data.repository.DecryptedSearchHistoryItem
 import com.example.data.repository.EncryptedSearchHistoryRepository
 import com.example.data.repository.SessionMonitorFirestoreRepository
@@ -146,6 +151,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     val isForegroundServiceRunning: StateFlow<Boolean> = LiveSessionRuntime.isForegroundServiceRunning
     val isMediaPlaybackActive: StateFlow<Boolean> = LiveSessionRuntime.isMediaPlaybackActive
     val activeMediaTitle: StateFlow<String> = LiveSessionRuntime.activeMediaTitle
+    val vpnTunnelStatus: StateFlow<VpnTunnelStatus> = VpnTunnelRuntime.status
 
     val sessionGuardStats: StateFlow<SessionGuardStats> = combine(
         sessionRoundLogs,
@@ -216,8 +222,13 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
                 val proxyKey = "${config.browserMode}:${config.torProxyProtocol}:${config.torProxyHost}:${config.torProxyPort}"
                 if (proxyKey != lastAppliedProxyKey) {
+                    val isColdStartSurface = lastAppliedProxyKey == null && config.browserMode == BrowserMode.SURFACE
                     lastAppliedProxyKey = proxyKey
-                    applyProxyForMode(config)
+                    if (isColdStartSurface) {
+                        _uiState.update { it.copy(torProxyState = TorProxyState.Inactive) }
+                    } else {
+                        applyProxyForMode(config)
+                    }
                 }
 
                 if (!autoStartedBackgroundService) {
@@ -294,11 +305,55 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         )
 
         viewModelScope.launch {
-            LiveSessionRuntime.mediaControlCommands.collectLatest { cmd ->
-                if (cmd == LiveMonitorForegroundService.CMD_PAUSE_MEDIA) {
-                    webViewPool.pauseAllMedia()
+            LiveSessionRuntime.mediaControlCommands.collect { cmd ->
+                when {
+                    cmd == LiveMonitorForegroundService.CMD_PLAY_MEDIA -> webViewPool.resumeActiveMedia()
+                    cmd == LiveMonitorForegroundService.CMD_PAUSE_MEDIA -> webViewPool.pauseAllMedia()
+                    cmd == LiveMonitorForegroundService.CMD_STOP_MEDIA -> {
+                        webViewPool.pauseAllMedia()
+                        LiveSessionRuntime.clearMediaSession()
+                        prefsRepo.clearPersistedMediaState()
+                    }
+                    cmd.startsWith(LiveMonitorForegroundService.CMD_SEEK_PREFIX) -> {
+                        val seekMs = cmd.removePrefix(LiveMonitorForegroundService.CMD_SEEK_PREFIX).toLongOrNull()
+                        if (seekMs != null) {
+                            webViewPool.seekActiveMedia(seekMs)
+                        }
+                    }
+                    cmd == LiveMonitorForegroundService.CMD_NEXT_TRACK -> webViewPool.skipNextMedia()
+                    cmd == LiveMonitorForegroundService.CMD_PREV_TRACK -> webViewPool.skipPrevMedia()
                 }
             }
+        }
+
+        viewModelScope.launch {
+            combine(
+                LiveSessionRuntime.hasMediaSession,
+                LiveSessionRuntime.activeMediaTitle,
+                LiveSessionRuntime.activeMediaArtist,
+                LiveSessionRuntime.activeMediaUrl,
+                LiveSessionRuntime.activeMediaPositionMs,
+            ) { hasSession, title, artist, url, posMs ->
+                PersistedMediaState(
+                    title = if (hasSession) title else "",
+                    artist = artist,
+                    url = url,
+                    positionMs = posMs,
+                    durationMs = LiveSessionRuntime.activeMediaDurationMs.value,
+                )
+            }
+                .distinctUntilChanged { old, new ->
+                    old.title == new.title &&
+                        old.artist == new.artist &&
+                        old.url == new.url &&
+                        old.durationMs == new.durationMs &&
+                        (old.positionMs / 2_000L) == (new.positionMs / 2_000L)
+                }
+                .collectLatest { state ->
+                    if (state.title.isNotBlank()) {
+                        prefsRepo.savePersistedMediaState(state)
+                    }
+                }
         }
     }
 
@@ -639,8 +694,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun confirmShredSession() {
         webViewPool.shredAllSessions()
+        LiveSessionRuntime.clearMediaSession()
         unlockedVaultKey = null
-        viewModelScope.launch { searchHistoryRepo.clearAll() }
+        viewModelScope.launch {
+            searchHistoryRepo.clearAll()
+            prefsRepo.clearPersistedMediaState()
+        }
         val seed = UUID.randomUUID().toString().take(8).uppercase()
         val profile = PrivacyScripts.profileForSeed(seed)
         val cleanTab = BrowserTab(
@@ -1094,6 +1153,34 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun applyServerPrivacyOverrides(serverConfig: com.example.data.repository.AdminServerConfig) = viewModelScope.launch {
+        if (serverConfig.emergencyLockdown) {
+            prefsRepo.applyPrivacyDefaults(maximumPrivacy = true)
+            prefsRepo.setTrackerBlocker(true)
+            prefsRepo.setCosmeticAdBlock(true)
+        } else if (serverConfig.forceAdBlockSync) {
+            prefsRepo.setTrackerBlocker(true)
+            prefsRepo.setCosmeticAdBlock(true)
+        }
+        if (serverConfig.strictTorRequired) {
+            prefsRepo.setBrowserMode(BrowserMode.TOR_ONION)
+        }
+        _uiState.value.activeTab.let { tab ->
+            if (!tab.isStartPage) webViewPool.getWebView(tab.id)?.reload()
+        }
+        val activeOverrides = buildList {
+            if (serverConfig.emergencyLockdown) add("Emergency Lockdown")
+            if (serverConfig.strictTorRequired) add("Strict Tor Routing")
+            if (serverConfig.forceAdBlockSync) add("Global Ad-Block Sync")
+        }
+        val summary = if (activeOverrides.isEmpty()) {
+            "No strict server overrides currently active."
+        } else {
+            "Applied server overrides: ${activeOverrides.joinToString(", ")}"
+        }
+        _uiState.update { it.copy(statusBannerMessage = summary) }
+    }
+
     fun setFingerprintRandomization(enabled: Boolean) = viewModelScope.launch {
         prefsRepo.setFingerprintRandomization(enabled)
     }
@@ -1354,11 +1441,20 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     fun onAppBackgrounded() {
         val cfg = _uiState.value.securityConfig
         val hasOpenWebTab = _uiState.value.tabs.any { !it.isStartPage }
+        val hasMediaHostTab = _uiState.value.tabs.any { tab ->
+            val host = TrackerAndUrlEngine.normalizeHost(tab.url).orEmpty()
+            host == "youtube.com" ||
+                host.endsWith(".youtube.com") ||
+                host == "youtu.be" ||
+                host == "vimeo.com" ||
+                host == "twitch.tv" ||
+                host == "soundcloud.com"
+        }
         val mediaPlaying = LiveSessionRuntime.isMediaPlaybackActive.value
 
         if (cfg.backgroundMediaPlaybackEnabled && (mediaPlaying || hasOpenWebTab)) {
             if (!LiveSessionRuntime.isForegroundServiceRunning.value &&
-                (mediaPlaying || cfg.backgroundLiveServiceEnabled)
+                (mediaPlaying || hasMediaHostTab || cfg.backgroundLiveServiceEnabled)
             ) {
                 runCatching { LiveMonitorForegroundService.start(getApplication()) }
             }
@@ -1402,6 +1498,32 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                     "Biometric App Lock disabled."
                 },
             )
+        }
+    }
+
+    fun selectVpnProfile(profile: VpnServerProfile) = viewModelScope.launch {
+        prefsRepo.setVpnProfile(profile)
+        if (VpnTunnelRuntime.status.value is VpnTunnelStatus.Connected ||
+            VpnTunnelRuntime.status.value is VpnTunnelStatus.Connecting
+        ) {
+            OnionShieldVpnService.startTunnel(getApplication(), profile)
+        }
+        _uiState.update {
+            it.copy(statusBannerMessage = "VPN profile set to ${profile.displayName} (${profile.badge}).")
+        }
+    }
+
+    fun startVpnTunnelAfterConsent(profile: VpnServerProfile = _uiState.value.securityConfig.vpnProfile) {
+        OnionShieldVpnService.startTunnel(getApplication(), profile)
+        _uiState.update {
+            it.copy(statusBannerMessage = "Encrypted VPN connected via ${profile.displayName}.")
+        }
+    }
+
+    fun stopVpnTunnel() {
+        OnionShieldVpnService.stopTunnel(getApplication())
+        _uiState.update {
+            it.copy(statusBannerMessage = "VPN tunnel disconnected.")
         }
     }
 

@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -55,6 +56,12 @@ class PrivacyPreferencesRepository(private val context: Context) {
         val BACKGROUND_LIVE_SERVICE = booleanPreferencesKey("background_live_service")
         val BACKGROUND_MEDIA_PLAYBACK = booleanPreferencesKey("background_media_playback")
         val BIOMETRIC_APP_LOCK = booleanPreferencesKey("biometric_app_lock_enabled")
+        val VPN_PROFILE = stringPreferencesKey("vpn_server_profile")
+        val LAST_MEDIA_TITLE = stringPreferencesKey("last_media_title")
+        val LAST_MEDIA_ARTIST = stringPreferencesKey("last_media_artist")
+        val LAST_MEDIA_URL = stringPreferencesKey("last_media_url")
+        val LAST_MEDIA_POSITION_MS = longPreferencesKey("last_media_position_ms")
+        val LAST_MEDIA_DURATION_MS = longPreferencesKey("last_media_duration_ms")
     }
 
     val securityConfig: Flow<SecurityConfig> = context.privacyDataStore.data.map { prefs ->
@@ -101,6 +108,9 @@ class PrivacyPreferencesRepository(private val context: Context) {
             backgroundLiveServiceEnabled = prefs[Keys.BACKGROUND_LIVE_SERVICE] ?: false,
             backgroundMediaPlaybackEnabled = prefs[Keys.BACKGROUND_MEDIA_PLAYBACK] ?: true,
             biometricAppLockEnabled = prefs[Keys.BIOMETRIC_APP_LOCK] ?: true,
+            vpnProfile = prefs[Keys.VPN_PROFILE]?.let {
+                runCatching { VpnServerProfile.valueOf(it) }.getOrNull()
+            } ?: VpnServerProfile.CLOUDFLARE_WARP,
         )
     }
 
@@ -116,6 +126,16 @@ class PrivacyPreferencesRepository(private val context: Context) {
 
     val vaultWrappedDek: Flow<String?> = context.privacyDataStore.data.map { prefs ->
         prefs[Keys.VAULT_WRAPPED_DEK]?.takeIf { it.isNotBlank() }
+    }
+
+    val persistedMediaState: Flow<PersistedMediaState> = context.privacyDataStore.data.map { prefs ->
+        PersistedMediaState(
+            title = prefs[Keys.LAST_MEDIA_TITLE] ?: "",
+            artist = prefs[Keys.LAST_MEDIA_ARTIST] ?: "",
+            url = prefs[Keys.LAST_MEDIA_URL] ?: "",
+            positionMs = prefs[Keys.LAST_MEDIA_POSITION_MS] ?: 0L,
+            durationMs = prefs[Keys.LAST_MEDIA_DURATION_MS] ?: 0L,
+        )
     }
 
     suspend fun setBrowserMode(mode: BrowserMode) {
@@ -330,5 +350,29 @@ class PrivacyPreferencesRepository(private val context: Context) {
 
     suspend fun setBiometricAppLockEnabled(enabled: Boolean) {
         context.privacyDataStore.edit { it[Keys.BIOMETRIC_APP_LOCK] = enabled }
+    }
+
+    suspend fun setVpnProfile(profile: VpnServerProfile) {
+        context.privacyDataStore.edit { it[Keys.VPN_PROFILE] = profile.name }
+    }
+
+    suspend fun savePersistedMediaState(state: PersistedMediaState) {
+        context.privacyDataStore.edit {
+            it[Keys.LAST_MEDIA_TITLE] = state.title.take(100)
+            it[Keys.LAST_MEDIA_ARTIST] = state.artist.take(80)
+            it[Keys.LAST_MEDIA_URL] = state.url.take(512)
+            it[Keys.LAST_MEDIA_POSITION_MS] = state.positionMs.coerceAtLeast(0L)
+            it[Keys.LAST_MEDIA_DURATION_MS] = state.durationMs.coerceAtLeast(0L)
+        }
+    }
+
+    suspend fun clearPersistedMediaState() {
+        context.privacyDataStore.edit {
+            it.remove(Keys.LAST_MEDIA_TITLE)
+            it.remove(Keys.LAST_MEDIA_ARTIST)
+            it.remove(Keys.LAST_MEDIA_URL)
+            it.remove(Keys.LAST_MEDIA_POSITION_MS)
+            it.remove(Keys.LAST_MEDIA_DURATION_MS)
+        }
     }
 }

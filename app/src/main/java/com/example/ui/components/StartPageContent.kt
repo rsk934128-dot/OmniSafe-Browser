@@ -1,5 +1,9 @@
 package com.example.ui.components
 
+import android.app.Activity
+import android.net.VpnService
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -38,6 +42,8 @@ import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.TravelExplore
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material.icons.rounded.VpnKey
+import androidx.compose.material.icons.rounded.VpnLock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -61,6 +67,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -74,6 +81,8 @@ import com.example.data.BrowserTab
 import com.example.data.PinnedAppEntity
 import com.example.data.SecurityConfig
 import com.example.data.TorProxyState
+import com.example.data.VpnServerProfile
+import com.example.data.VpnTunnelStatus
 import com.example.ui.theme.LocalShieldColors
 
 private data class QuickBookmarkLink(
@@ -135,9 +144,21 @@ fun StartPageContent(
     onTogglePopupBlocker: (Boolean) -> Unit = {},
     onTestTorSocket: () -> Unit,
     onOpenSecuritySettings: () -> Unit,
+    vpnStatus: VpnTunnelStatus = VpnTunnelStatus.Disconnected,
+    onConnectVpnAfterConsent: (VpnServerProfile) -> Unit = {},
+    onDisconnectVpn: () -> Unit = {},
+    onOpenVpnHub: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
     val shieldColors = LocalShieldColors.current
+    val vpnConsentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            onConnectVpnAfterConsent(config.vpnProfile)
+        }
+    }
     val isTor = config.browserMode == BrowserMode.TOR_ONION
     val accentColor by animateColorAsState(
         targetValue = if (isTor) shieldColors.torAccent else shieldColors.surfaceAccent,
@@ -263,6 +284,108 @@ fun StartPageContent(
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                 )
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Internet VPN Quick-Connect & Free Web Links Strip
+        item {
+            val isVpnActive = vpnStatus is VpnTunnelStatus.Connected || vpnStatus is VpnTunnelStatus.Connecting
+            val vpnAccent = if (vpnStatus is VpnTunnelStatus.Connected) shieldColors.secureGreen else shieldColors.surfaceAccent
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 640.dp)
+                    .testTag("start_vpn_connect_card"),
+                shape = MaterialTheme.shapes.medium,
+                color = vpnAccent.copy(alpha = 0.11f),
+                border = BorderStroke(1.dp, vpnAccent.copy(alpha = 0.45f)),
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Icon(
+                        imageVector = if (vpnStatus is VpnTunnelStatus.Connected) Icons.Rounded.VpnLock else Icons.Rounded.VpnKey,
+                        contentDescription = "Internet VPN",
+                        tint = vpnAccent,
+                        modifier = Modifier.size(24.dp),
+                    )
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = when (vpnStatus) {
+                                is VpnTunnelStatus.Connected -> "VPN Connected (${vpnStatus.profile.badge})"
+                                is VpnTunnelStatus.Connecting -> "Connecting Encrypted VPN…"
+                                is VpnTunnelStatus.Error -> "VPN Attention Required"
+                                VpnTunnelStatus.Disconnected -> "Internet VPN Ready"
+                            },
+                            style = MaterialTheme.typography.titleSmall,
+                            color = vpnAccent,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = when (vpnStatus) {
+                                is VpnTunnelStatus.Connected ->
+                                    "Tunnel ${vpnStatus.tunnelIp} • ${vpnStatus.queriesTunneled} encrypted DNS queries"
+                                else ->
+                                    "Connect encrypted DNS-over-HTTPS VPN & browse web links freely"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp), horizontalAlignment = Alignment.End) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isVpnActive) MaterialTheme.colorScheme.error.copy(alpha = 0.2f) else vpnAccent.copy(alpha = 0.22f),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    if (isVpnActive) {
+                                        onDisconnectVpn()
+                                    } else {
+                                        val prepare = runCatching { VpnService.prepare(context) }.getOrNull()
+                                        if (prepare != null) {
+                                            vpnConsentLauncher.launch(prepare)
+                                        } else {
+                                            onConnectVpnAfterConsent(config.vpnProfile)
+                                        }
+                                    }
+                                }
+                                .testTag("start_vpn_toggle_button"),
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .height(48.dp),
+                            ) {
+                                Text(
+                                    text = if (isVpnActive) "Disconnect" else "Connect VPN",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (isVpnActive) MaterialTheme.colorScheme.error else vpnAccent,
+                                )
+                            }
+                        }
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable(onClick = onOpenVpnHub)
+                                .height(48.dp)
+                                .padding(horizontal = 8.dp)
+                                .testTag("start_open_vpn_hub_button"),
+                        ) {
+                            Text(
+                                text = "Web Links Hub",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }

@@ -48,6 +48,22 @@ interface WebViewEventCallbacks {
     fun onLinkLongPressed(tabId: String, url: String, title: String?)
 }
 
+internal class BackgroundCapableWebView(context: Context) : WebView(context) {
+    @Volatile
+    var keepMediaAliveInBackground: Boolean = true
+
+    internal fun resolveEffectiveWindowVisibility(requestedVisibility: Int): Int =
+        if (keepMediaAliveInBackground && requestedVisibility != View.VISIBLE) {
+            View.VISIBLE
+        } else {
+            requestedVisibility
+        }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(resolveEffectiveWindowVisibility(visibility))
+    }
+}
+
 class WebViewPool(
     context: Context,
     private val callbacks: WebViewEventCallbacks,
@@ -153,12 +169,83 @@ class WebViewPool(
 
     fun pauseAllMedia() {
         playingMediaTabs.clear()
-        syncGlobalMediaRuntime()
+        LiveSessionRuntime.updateMediaSnapshot(
+            isPlaying = false,
+            title = LiveSessionRuntime.activeMediaTitle.value,
+        )
         mainHandler.post {
             pool.values.forEach { wv ->
                 runCatching {
                     wv.evaluateJavascript("window.__osBgMediaPauseAll && window.__osBgMediaPauseAll();", null)
                 }
+            }
+        }
+    }
+
+    fun resumeActiveMedia() {
+        mainHandler.post {
+            pool.values.forEach { wv ->
+                runCatching {
+                    wv.onResume()
+                    wv.resumeTimers()
+                    wv.evaluateJavascript("window.__osBgMediaForcePlay && window.__osBgMediaForcePlay();", null)
+                }
+            }
+        }
+    }
+
+    fun seekActiveMedia(positionMs: Long) {
+        val clamped = positionMs.coerceAtLeast(0L)
+        mainHandler.post {
+            pool.values.forEach { wv ->
+                runCatching {
+                    wv.evaluateJavascript("window.__osBgMediaSeekTo && window.__osBgMediaSeekTo($clamped);", null)
+                }
+            }
+        }
+    }
+
+    fun skipNextMedia() {
+        mainHandler.post {
+            pool.values.forEach { wv ->
+                runCatching {
+                    wv.evaluateJavascript("window.__osBgMediaNext && window.__osBgMediaNext();", null)
+                }
+            }
+        }
+    }
+
+    fun skipPrevMedia() {
+        mainHandler.post {
+            pool.values.forEach { wv ->
+                runCatching {
+                    wv.evaluateJavascript("window.__osBgMediaPrev && window.__osBgMediaPrev();", null)
+                }
+            }
+        }
+    }
+
+    fun extractPageTextSnippet(tabId: String, onResult: (String) -> Unit) {
+        val wv = pool[tabId]
+        if (wv == null) {
+            onResult("")
+            return
+        }
+        mainHandler.post {
+            runCatching {
+                wv.evaluateJavascript(
+                    "(function(){ try { return (document.body && document.body.innerText ? document.body.innerText : '').replace(/\\s+/g,' ').trim().slice(0, 4000); } catch(e) { return ''; } })();",
+                ) { raw ->
+                    val decoded = raw
+                        ?.removeSurrounding("\"")
+                        ?.replace("\\n", " ")
+                        ?.replace("\\\"", "\"")
+                        ?.replace("\\\\", "\\")
+                        .orEmpty()
+                    onResult(decoded)
+                }
+            }.onFailure {
+                onResult("")
             }
         }
     }
@@ -235,8 +322,9 @@ class WebViewPool(
         config: SecurityConfig,
         wrapperContext: MutableContextWrapper,
     ): WebView {
-        val webView = WebView(wrapperContext).apply {
+        val webView = BackgroundCapableWebView(wrapperContext).apply {
             tag = seed
+            keepMediaAliveInBackground = config.backgroundMediaPlaybackEnabled
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -247,16 +335,63 @@ class WebViewPool(
             addJavascriptInterface(
                 object {
                     @JavascriptInterface
-                    fun onMediaPlaying(title: String?) {
+                    fun onMediaMetadataUpdated(
+                        title: String?,
+                        artist: String?,
+                        durationMs: Double,
+                        positionMs: Double,
+                        isPlaying: Boolean,
+                    ) {
                         val cleanTitle = title?.trim().orEmpty().ifBlank { "Media Audio" }
-                        playingMediaTabs[tabId] = cleanTitle
-                        syncGlobalMediaRuntime()
+                        val cleanArtist = artist?.trim().orEmpty().ifBlank { "OnionShield Media" }
+                        val dur = if (durationMs.isFinite() && durationMs > 0.0) durationMs.toLong() else 0L
+                        val pos = if (positionMs.isFinite() && positionMs >= 0.0) positionMs.toLong() else 0L
+                        val url = tabCurrentUrls[tabId].orEmpty()
+
+                        if (isPlaying) {
+                            playingMediaTabs[tabId] = cleanTitle
+                        } else {
+                            playingMediaTabs.remove(tabId)
+                        }
+                        val anyPlaying = playingMediaTabs.isNotEmpty() || isPlaying
+                        LiveSessionRuntime.updateMediaSnapshot(
+                            isPlaying = anyPlaying,
+                            title = playingMediaTabs.values.firstOrNull() ?: cleanTitle,
+                            artist = cleanArtist,
+                            positionMs = pos,
+                            durationMs = dur,
+                            url = url,
+                        )
+                        if (anyPlaying &&
+                            currentConfig.backgroundMediaPlaybackEnabled &&
+                            !LiveSessionRuntime.isForegroundServiceRunning.value
+                        ) {
+                            mainHandler.post {
+                                runCatching { LiveMonitorForegroundService.start(appContext) }
+                            }
+                        }
+                    }
+
+                    @JavascriptInterface
+                    fun onMediaPlaying(title: String?) {
+                        onMediaMetadataUpdated(title, "OnionShield Media", 0.0, 0.0, true)
                     }
 
                     @JavascriptInterface
                     fun onMediaStopped() {
                         playingMediaTabs.remove(tabId)
-                        syncGlobalMediaRuntime()
+                        val remainingTitle = playingMediaTabs.values.firstOrNull()
+                        if (remainingTitle != null) {
+                            LiveSessionRuntime.updateMediaSnapshot(
+                                isPlaying = true,
+                                title = remainingTitle,
+                            )
+                        } else {
+                            LiveSessionRuntime.updateMediaSnapshot(
+                                isPlaying = false,
+                                title = LiveSessionRuntime.activeMediaTitle.value,
+                            )
+                        }
                     }
                 },
                 "OnionShieldMediaBridge",
@@ -666,6 +801,8 @@ class WebViewPool(
         seed: String,
         urlOverride: String? = null,
     ) {
+        (webView as? BackgroundCapableWebView)?.keepMediaAliveInBackground =
+            config.backgroundMediaPlaybackEnabled
         val jsDisabled = isJsDisabledForTab(tabId, config, urlOverride)
         val settings = webView.settings
         if (settings.javaScriptEnabled != !jsDisabled) {

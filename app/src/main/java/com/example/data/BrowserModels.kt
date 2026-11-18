@@ -67,6 +67,65 @@ enum class SearchEngine(
     ),
 }
 
+enum class VpnServerProfile(
+    val displayName: String,
+    val badge: String,
+    val dohUrl: String,
+    val bootstrapIp: String,
+    val summary: String,
+) {
+    CLOUDFLARE_WARP(
+        displayName = "Cloudflare Encrypted",
+        badge = "1.1.1.1",
+        dohUrl = "https://cloudflare-dns.com/dns-query",
+        bootstrapIp = "1.1.1.1",
+        summary = "Ultra-fast encrypted DoH tunnel with no-logs resolver",
+    ),
+    QUAD9_SECURE(
+        displayName = "Quad9 Shield",
+        badge = "9.9.9.9",
+        dohUrl = "https://dns.quad9.net/dns-query",
+        bootstrapIp = "9.9.9.9",
+        summary = "Encrypted tunnel blocking known phishing & malware hosts",
+    ),
+    ADGUARD_PRIVACY(
+        displayName = "AdGuard Clean Web",
+        badge = "Ad-Filter",
+        dohUrl = "https://dns.adguard-dns.com/dns-query",
+        bootstrapIp = "94.140.14.14",
+        summary = "Encrypted DNS-over-HTTPS blocking ad & tracker domains",
+    ),
+    GOOGLE_DOH(
+        displayName = "Google Secure DoH",
+        badge = "8.8.8.8",
+        dohUrl = "https://dns.google/dns-query",
+        bootstrapIp = "8.8.8.8",
+        summary = "High-availability global encrypted resolver",
+    ),
+}
+
+sealed class VpnTunnelStatus {
+    data object Disconnected : VpnTunnelStatus()
+    data class Connecting(val profile: VpnServerProfile) : VpnTunnelStatus()
+    data class Connected(
+        val profile: VpnServerProfile,
+        val tunnelIp: String = "10.111.222.1",
+        val queriesTunneled: Long = 0L,
+        val blockedQueries: Long = 0L,
+        val lastHost: String = "",
+        val connectedSinceEpochMs: Long = System.currentTimeMillis(),
+    ) : VpnTunnelStatus()
+    data class Error(val reason: String) : VpnTunnelStatus()
+}
+
+data class PersistedMediaState(
+    val title: String = "",
+    val artist: String = "",
+    val url: String = "",
+    val positionMs: Long = 0L,
+    val durationMs: Long = 0L,
+)
+
 enum class BridgeTransport(val label: String, val transportName: String, val summary: String) {
     DIRECT(
         label = "Direct",
@@ -182,6 +241,7 @@ data class SecurityConfig(
     val backgroundLiveServiceEnabled: Boolean = false,
     val backgroundMediaPlaybackEnabled: Boolean = true,
     val biometricAppLockEnabled: Boolean = true,
+    val vpnProfile: VpnServerProfile = VpnServerProfile.CLOUDFLARE_WARP,
 ) {
     val torEndpoint: String
         get() = "${torProxyProtocol.scheme}://$torProxyHost:$torProxyPort"

@@ -390,3 +390,80 @@ test("Admin Config & Maintenance Logs: unauthenticated, non-admin, and unverifie
   );
   await assertSucceeds(logRef.delete());
 });
+
+test("Custom 'admin' claim: token.admin=true grants access while admin=false is denied", async () => {
+  const CLAIM_ADMIN_UID = "claim_admin_uid";
+  const FALSE_CLAIM_UID = "false_claim_uid";
+  const now = new Date();
+
+  const claimAdminDb = testEnv.authenticatedContext(CLAIM_ADMIN_UID, {
+    email: "ops-claim@onionshield.org",
+    email_verified: true,
+    admin: true,
+  }).firestore();
+
+  const falseClaimDb = testEnv.authenticatedContext(FALSE_CLAIM_UID, {
+    email: "viewer@onionshield.org",
+    email_verified: true,
+    admin: false,
+  }).firestore();
+
+  // Signed-in user with admin=false claim must be denied
+  await assertFails(falseClaimDb.collection("admin_config").doc("global_settings").get());
+  await assertFails(falseClaimDb.collection("maintenance_logs").get());
+  await assertFails(
+    falseClaimDb.collection("admin_config").doc("global_settings").set({
+      maintenanceMode: true,
+      strictTorRequired: true,
+      remoteTelemetryEnabled: false,
+      forceAdBlockSync: true,
+      emergencyLockdown: true,
+      maintenanceBanner: "Unauthorized attempt",
+      updatedByUid: FALSE_CLAIM_UID,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // User with custom 'admin' claim (admin: true) can create/update server privacy overrides and maintenance logs
+  const configRef = claimAdminDb.collection("admin_config").doc("global_settings");
+  await assertSucceeds(
+    configRef.set({
+      maintenanceMode: false,
+      strictTorRequired: true,
+      remoteTelemetryEnabled: false,
+      forceAdBlockSync: true,
+      emergencyLockdown: true,
+      maintenanceBanner: "Emergency privacy override active.",
+      updatedByUid: CLAIM_ADMIN_UID,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  await assertSucceeds(configRef.get());
+  await assertSucceeds(
+    configRef.update({
+      emergencyLockdown: false,
+      updatedByUid: CLAIM_ADMIN_UID,
+      updatedAt: new Date(),
+    })
+  );
+
+  const claimLogRef = claimAdminDb.collection("maintenance_logs").doc("log_claim_001");
+  await assertSucceeds(
+    claimLogRef.set({
+      action: "Toggled Server-Side Privacy Override",
+      category: "SECURITY",
+      severity: "CRITICAL",
+      details: "Enabled emergency lockdown via custom admin claim session.",
+      actorUid: CLAIM_ADMIN_UID,
+      actorEmail: "ops-claim@onionshield.org",
+      clientTimestampMs: 1700000010000,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  await assertSucceeds(claimAdminDb.collection("maintenance_logs").orderBy("createdAt", "desc").get());
+  await assertSucceeds(claimLogRef.delete());
+});
+

@@ -27,7 +27,10 @@ object TorProxyController {
         port: Int,
         protocol: ProxyProtocol,
     ): TorProxyState {
-        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+        val supported = runCatching {
+            WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)
+        }.getOrDefault(false)
+        if (!supported) {
             return if (mode == BrowserMode.TOR_ONION) {
                 TorProxyState.UnsupportedApi("WebView PROXY_OVERRIDE is not supported on this Android WebView version.")
             } else {
@@ -35,25 +38,39 @@ object TorProxyController {
             }
         }
 
-        val controller = ProxyController.getInstance()
-        return if (mode == BrowserMode.SURFACE) {
-            suspendCancellableCoroutine { cont ->
-                controller.clearProxyOverride(mainExecutor) {
-                    if (cont.isActive) cont.resume(TorProxyState.Inactive)
-                }
+        val controller = runCatching { ProxyController.getInstance() }.getOrElse { err ->
+            return if (mode == BrowserMode.TOR_ONION) {
+                TorProxyState.UnsupportedApi(err.localizedMessage ?: "WebView ProxyController unavailable.")
+            } else {
+                TorProxyState.Inactive
             }
+        }
+        return if (mode == BrowserMode.SURFACE) {
+            runCatching {
+                suspendCancellableCoroutine { cont ->
+                    controller.clearProxyOverride(mainExecutor) {
+                        if (cont.isActive) cont.resume(TorProxyState.Inactive)
+                    }
+                }
+            }.getOrDefault(TorProxyState.Inactive)
         } else {
             val endpoint = "${protocol.scheme}://$host:$port"
             val config = ProxyConfig.Builder()
                 .addProxyRule(endpoint)
                 .build()
 
-            suspendCancellableCoroutine { cont ->
-                controller.setProxyOverride(config, mainExecutor) {
-                    if (cont.isActive) {
-                        cont.resume(TorProxyState.Checking)
+            runCatching {
+                suspendCancellableCoroutine { cont ->
+                    controller.setProxyOverride(config, mainExecutor) {
+                        if (cont.isActive) {
+                            cont.resume(TorProxyState.Checking)
+                        }
                     }
                 }
+            }.onFailure { err ->
+                return TorProxyState.UnsupportedApi(
+                    err.localizedMessage ?: "Unable to configure WebView Tor proxy.",
+                )
             }
             checkProxyReachability(host, port, protocol)
         }

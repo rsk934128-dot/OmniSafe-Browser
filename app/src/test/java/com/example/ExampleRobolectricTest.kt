@@ -812,4 +812,398 @@ class ExampleRobolectricTest {
         repo.setBiometricAppLockEnabled(true)
         assertTrue(repo.securityConfig.first().biometricAppLockEnabled)
     }
+
+    @Test
+    fun `dns vpn packet codec parses ipv4 udp query, extracts domain, builds valid checksummed response, and builds nxdomain`() {
+        // Minimal DNS query for "example.org" (QTYPE=A, QCLASS=IN)
+        val dnsQuery = byteArrayOf(
+            0x12, 0x34, // Transaction ID
+            0x01, 0x00, // Flags: standard query, RD=1
+            0x00, 0x01, // QDCOUNT=1
+            0x00, 0x00, // ANCOUNT=0
+            0x00, 0x00, // NSCOUNT=0
+            0x00, 0x00, // ARCOUNT=0
+            // Question: 7 "example" 3 "org" 0
+            7, 'e'.code.toByte(), 'x'.code.toByte(), 'a'.code.toByte(), 'm'.code.toByte(), 'p'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
+            3, 'o'.code.toByte(), 'r'.code.toByte(), 'g'.code.toByte(),
+            0,
+            0x00, 0x01, // QTYPE A
+            0x00, 0x01, // QCLASS IN
+        )
+
+        val udpLen = 8 + dnsQuery.size
+        val ipTotalLen = 20 + udpLen
+        val packet = ByteArray(ipTotalLen)
+        packet[0] = 0x45.toByte() // IPv4, IHL=5
+        packet[2] = (ipTotalLen ushr 8).toByte()
+        packet[3] = (ipTotalLen and 0xFF).toByte()
+        packet[8] = 64.toByte()
+        packet[9] = 17.toByte() // UDP
+        // Src IP: 10.111.222.1
+        packet[12] = 10; packet[13] = 111; packet[14] = 222.toByte(); packet[15] = 1
+        // Dst IP: 10.111.222.2
+        packet[16] = 10; packet[17] = 111; packet[18] = 222.toByte(); packet[19] = 2
+        // UDP SrcPort=53535, DstPort=53, Length=udpLen
+        packet[20] = (53535 ushr 8).toByte(); packet[21] = (53535 and 0xFF).toByte()
+        packet[22] = 0; packet[23] = 53
+        packet[24] = (udpLen ushr 8).toByte(); packet[25] = (udpLen and 0xFF).toByte()
+        System.arraycopy(dnsQuery, 0, packet, 28, dnsQuery.size)
+
+        val parsed = com.example.browser.DnsVpnPacketCodec.parseIpv4UdpDnsQuery(packet, packet.size)
+        assertNotNull(parsed)
+        assertEquals("example.org", parsed!!.domainName)
+        assertEquals(53535, parsed.srcPort)
+        assertEquals(53, parsed.dstPort)
+
+        // Build NXDOMAIN response and verify DNS flags
+        val nxdomain = com.example.browser.DnsVpnPacketCodec.buildErrorDnsResponse(parsed.dnsPayload, 3)
+        assertNotNull(nxdomain)
+        assertEquals(0x81.toByte(), nxdomain!![2]) // QR=1, RD preserved
+        assertEquals(0x83.toByte(), nxdomain[3]) // RA=1, RCODE=3 (NXDOMAIN)
+
+        // Wrap into IPv4/UDP response and verify swapped headers + valid IPv4 header checksum
+        val responsePacket = com.example.browser.DnsVpnPacketCodec.buildIpv4UdpDnsResponse(parsed, nxdomain)
+        assertEquals(ipTotalLen, responsePacket.size)
+        // Src IP should now be 10.111.222.2, Dst IP should now be 10.111.222.1
+        assertEquals(2.toByte(), responsePacket[15])
+        assertEquals(1.toByte(), responsePacket[19])
+        // UDP SrcPort=53, DstPort=53535
+        assertEquals(53, ((responsePacket[20].toInt() and 0xFF) shl 8) or (responsePacket[21].toInt() and 0xFF))
+        assertEquals(53535, ((responsePacket[22].toInt() and 0xFF) shl 8) or (responsePacket[23].toInt() and 0xFF))
+        // One's-complement checksum over complete valid IPv4 header must equal 0
+        assertEquals(0, com.example.browser.DnsVpnPacketCodec.computeInternetChecksum(responsePacket, 0, 20))
+    }
+
+    @Test
+    fun `vpn server profile defaults to cloudflare warp and persists selection in datastore`(): Unit = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = com.example.data.PrivacyPreferencesRepository(context)
+        assertEquals(com.example.data.VpnServerProfile.CLOUDFLARE_WARP, repo.securityConfig.first().vpnProfile)
+
+        repo.setVpnProfile(com.example.data.VpnServerProfile.QUAD9_SECURE)
+        assertEquals(com.example.data.VpnServerProfile.QUAD9_SECURE, repo.securityConfig.first().vpnProfile)
+
+        repo.setVpnProfile(com.example.data.VpnServerProfile.ADGUARD_PRIVACY)
+        assertEquals(com.example.data.VpnServerProfile.ADGUARD_PRIVACY, repo.securityConfig.first().vpnProfile)
+
+        repo.setVpnProfile(com.example.data.VpnServerProfile.CLOUDFLARE_WARP)
+        assertEquals(com.example.data.VpnServerProfile.CLOUDFLARE_WARP, repo.securityConfig.first().vpnProfile)
+    }
+
+    @Test
+    fun `youtube ad blocker blocks first-party ad endpoints and ad video streams while preserving real video playback`() {
+        val pageUrl = "https://m.youtube.com/watch?v=dQw4w9WgXcQ"
+        assertTrue(TrackerAndUrlEngine.isAdOrTrackerRequest("https://m.youtube.com/api/stats/ads?ns=yt", pageUrl))
+        assertTrue(TrackerAndUrlEngine.isAdOrTrackerRequest("https://www.youtube.com/pagead/viewthroughconversion/123/", pageUrl))
+        assertTrue(TrackerAndUrlEngine.isAdOrTrackerRequest("https://m.youtube.com/ptracking?video_id=abc", pageUrl))
+        assertTrue(TrackerAndUrlEngine.isAdOrTrackerRequest("https://m.youtube.com/get_midroll_info?v=abc", pageUrl))
+        assertTrue(TrackerAndUrlEngine.isAdOrTrackerRequest("https://www.youtube.com/youtubei/v1/player/ad_break", pageUrl))
+        assertTrue(TrackerAndUrlEngine.isAdOrTrackerRequest("https://rr2---sn-test.googlevideo.com/videoplayback?expire=999&oad=1&ctier=l", pageUrl))
+        assertTrue(TrackerAndUrlEngine.isAdOrTrackerRequest("https://googleads.g.doubleclick.net/pagead/id", pageUrl))
+
+        // Real YouTube watch page, player API, and normal video streams remain unblocked
+        assertFalse(TrackerAndUrlEngine.isAdOrTrackerRequest("https://m.youtube.com/watch?v=dQw4w9WgXcQ", pageUrl))
+        assertFalse(TrackerAndUrlEngine.isAdOrTrackerRequest("https://m.youtube.com/youtubei/v1/player", pageUrl))
+        assertFalse(TrackerAndUrlEngine.isAdOrTrackerRequest("https://rr2---sn-test.googlevideo.com/videoplayback?expire=999&ctier=A&mime=audio/mp4", pageUrl))
+    }
+
+    @Test
+    fun `privacy scripts include youtube ad stripper and background media visibility sync`() {
+        val script = PrivacyScripts.buildHardeningScript(
+            seed = "YTGUARD1",
+            enableWebRtcGuard = false,
+            enableFingerprintRandomization = false,
+            enableCosmeticAdBlock = true,
+            enablePopupGuard = true,
+            enableBackgroundMediaPlayback = true,
+        )
+        assertTrue(script.contains("__osYtAdBlockerInstalled"))
+        assertTrue(script.contains("ytm-promoted-video-renderer"))
+        assertTrue(script.contains("adPlacements"))
+        assertTrue(script.contains("skipYouTubeAdTick"))
+        assertTrue(script.contains("syncPlayingMediaNow"))
+    }
+
+    @Test
+    fun `background capable webview keeps window visibility visible when background media playback is enabled`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val webView = com.example.browser.BackgroundCapableWebView(context)
+        assertTrue(webView.keepMediaAliveInBackground)
+
+        assertEquals(android.view.View.VISIBLE, webView.resolveEffectiveWindowVisibility(android.view.View.GONE))
+        assertEquals(android.view.View.VISIBLE, webView.resolveEffectiveWindowVisibility(android.view.View.INVISIBLE))
+
+        webView.keepMediaAliveInBackground = false
+        assertEquals(android.view.View.GONE, webView.resolveEffectiveWindowVisibility(android.view.View.GONE))
+        assertEquals(android.view.View.INVISIBLE, webView.resolveEffectiveWindowVisibility(android.view.View.INVISIBLE))
+    }
+
+    @Test
+    fun `onion media session handler manages playback state, audio focus resume, and stop transitions`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        var playCalls = 0
+        var pauseCalls = 0
+        var stopCalls = 0
+        var lastSeekMs = -1L
+
+        val handler = com.example.browser.OnionMediaSessionHandler(
+            context = context,
+            onPlayCommand = { playCalls++ },
+            onPauseCommand = { pauseCalls++ },
+            onStopCommand = { stopCalls++ },
+            onSeekCommand = { lastSeekMs = it },
+            onSkipNextCommand = {},
+            onSkipPrevCommand = {},
+        )
+        try {
+            assertNotNull(handler.sessionToken)
+            handler.updatePlayback(
+                title = "Midnight Rain - Music Video",
+                artist = "YouTube Music",
+                isPlaying = true,
+                positionMs = 12_000L,
+                durationMs = 240_000L,
+            )
+            assertTrue(handler.snapshot.value.isPlaying)
+            assertTrue(handler.snapshot.value.hasActiveSession)
+            assertEquals("Midnight Rain - Music Video", handler.snapshot.value.title)
+            assertEquals("YouTube Music", handler.snapshot.value.artist)
+            assertEquals(12_000L, handler.snapshot.value.positionMs)
+            assertEquals(240_000L, handler.snapshot.value.durationMs)
+
+            // Transient audio focus loss pauses cleanly and resumes when focus returns
+            handler.handleAudioFocusChange(android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
+            assertFalse(handler.snapshot.value.isPlaying)
+            assertTrue(handler.snapshot.value.hasActiveSession)
+            assertEquals(1, pauseCalls)
+
+            handler.handleAudioFocusChange(android.media.AudioManager.AUDIOFOCUS_GAIN)
+            assertTrue(handler.snapshot.value.isPlaying)
+            assertEquals(1, playCalls)
+
+            // Stop deactivates session cleanly
+            handler.handleStopFromSession()
+            assertFalse(handler.snapshot.value.isPlaying)
+            assertFalse(handler.snapshot.value.hasActiveSession)
+            assertEquals(1, stopCalls)
+        } finally {
+            handler.release()
+        }
+    }
+
+    @Test
+    fun `foreground service handles pause resume actions with MediaStyle notification and persists media state`(): Unit = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        LiveSessionRuntime.updateMediaSnapshot(
+            isPlaying = true,
+            title = "Acoustic Chill Stream",
+            artist = "Live Channel",
+            positionMs = 30_000L,
+            durationMs = 180_000L,
+            url = "https://m.youtube.com/watch?v=test123",
+        )
+
+        val controller = Robolectric.buildService(
+            LiveMonitorForegroundService::class.java,
+            Intent(context, LiveMonitorForegroundService::class.java).setAction(LiveMonitorForegroundService.ACTION_START),
+        ).create().startCommand(0, 0)
+        val service = controller.get()
+
+        try {
+            val token = service.mediaSessionHandler?.sessionToken
+            assertNotNull(token)
+            assertTrue(service.isPartialWakeLockHeld())
+            assertTrue(service.isWifiLockHeld())
+
+            // Pause via notification action switches button to Resume Media and embeds MediaSession token
+            service.onStartCommand(
+                Intent(context, LiveMonitorForegroundService::class.java)
+                    .setAction(LiveMonitorForegroundService.ACTION_PAUSE_MEDIA),
+                0,
+                1,
+            )
+            val pausedNotif = service.buildNotification(
+                stats = com.example.browser.SessionGuardStats(elapsedMinutes = 5L),
+                config = com.example.data.SecurityConfig(browserMode = BrowserMode.SURFACE),
+                syncStatus = com.example.browser.SessionMonitorSyncStatus.Disabled,
+                torState = com.example.data.TorProxyState.Inactive,
+                isMediaActive = false,
+                mediaTitle = "Acoustic Chill Stream",
+                isMediaPausedSession = true,
+                mediaSessionToken = token,
+            )
+            assertEquals(2, pausedNotif.actions.size)
+            assertEquals(
+                context.getString(R.string.live_monitor_resume_media_action),
+                pausedNotif.actions[1].title.toString(),
+            )
+            assertTrue(pausedNotif.extras.containsKey(android.app.Notification.EXTRA_MEDIA_SESSION))
+
+            // DataStore persisted media state saves and clears cleanly
+            val repo = com.example.data.PrivacyPreferencesRepository(context)
+            repo.savePersistedMediaState(
+                com.example.data.PersistedMediaState(
+                    title = "Acoustic Chill Stream",
+                    artist = "Live Channel",
+                    url = "https://m.youtube.com/watch?v=test123",
+                    positionMs = 45_000L,
+                    durationMs = 180_000L,
+                ),
+            )
+            val restored = repo.persistedMediaState.first()
+            assertEquals("Acoustic Chill Stream", restored.title)
+            assertEquals("Live Channel", restored.artist)
+            assertEquals(45_000L, restored.positionMs)
+
+            repo.clearPersistedMediaState()
+            assertEquals("", repo.persistedMediaState.first().title)
+
+            // Verify PrivacyScripts includes remote MediaSession control hooks
+            val script = PrivacyScripts.buildHardeningScript(
+                seed = "MSESS1",
+                enableWebRtcGuard = false,
+                enableFingerprintRandomization = false,
+                enableBackgroundMediaPlayback = true,
+            )
+            assertTrue(script.contains("__osBgMediaForcePlay"))
+            assertTrue(script.contains("__osBgMediaSeekTo"))
+            assertTrue(script.contains("__osBgMediaNext"))
+            assertTrue(script.contains("__osBgMediaPrev"))
+            assertTrue(script.contains("onMediaMetadataUpdated"))
+        } finally {
+            LiveSessionRuntime.clearMediaSession()
+            controller.destroy()
+        }
+    }
+
+    @Test
+    fun `battery optimization helper builds zero-permission settings intents and reads power manager status`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val appDetailsIntent = com.example.ui.components.BatteryOptimizationHelper
+            .buildAppBatteryDetailsIntent(context.packageName)
+        assertEquals(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, appDetailsIntent.action)
+        assertEquals("package:${context.packageName}", appDetailsIntent.dataString)
+        assertTrue((appDetailsIntent.flags and Intent.FLAG_ACTIVITY_NEW_TASK) != 0)
+
+        val listIntent = com.example.ui.components.BatteryOptimizationHelper
+            .buildBatteryOptimizationListIntent()
+        assertEquals(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS, listIntent.action)
+        assertTrue((listIntent.flags and Intent.FLAG_ACTIVITY_NEW_TASK) != 0)
+
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val shadowPowerManager = Shadows.shadowOf(powerManager)
+        assertFalse(com.example.ui.components.BatteryOptimizationHelper.isBatteryOptimizationDisabled(context))
+
+        shadowPowerManager.setIgnoringBatteryOptimizations(context.packageName, true)
+        assertTrue(com.example.ui.components.BatteryOptimizationHelper.isBatteryOptimizationDisabled(context))
+    }
+
+    @Test
+    fun `gemini repository builds contextual prompts parses structured audit json and configures app check token`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertEquals("gemini-3.8-flash", com.example.data.repository.GeminiShieldRepository.MODEL_NAME)
+
+        val ctx = com.example.data.repository.PageAiContext(
+            url = "https://example.org/privacy",
+            title = "Example Privacy",
+            browserModeLabel = "Surface",
+            trackersBlockedCount = 4,
+            scriptsBlockedCount = 1,
+            pageTextSnippet = "We collect zero analytics cookies.",
+        )
+        val builtPrompt = com.example.data.repository.GeminiShieldRepository.buildContextualPrompt("Summarize this", ctx)
+        assertTrue(builtPrompt.contains("Summarize this"))
+        assertTrue(builtPrompt.contains("https://example.org/privacy"))
+        assertTrue(builtPrompt.contains("Blocked Trackers: 4"))
+        assertEquals("Just a question", com.example.data.repository.GeminiShieldRepository.buildContextualPrompt("  Just a question  ", null))
+
+        val sampleJson = """
+            {
+              "riskLevel": "Low",
+              "summary": "This page describes minimal cookie collection.",
+              "privacySignals": ["HTTPS verified", "4 trackers blocked by OnionShield"],
+              "recommendedAction": "Keep standard HTTPS-Only protection enabled."
+            }
+        """.trimIndent()
+        val parsed = com.example.data.repository.GeminiShieldRepository.parsePagePrivacyAuditJson(sampleJson)
+        assertEquals("Low", parsed.riskLevel)
+        assertEquals("This page describes minimal cookie collection.", parsed.summary)
+        assertEquals(2, parsed.privacySignals.size)
+        assertEquals("Keep standard HTTPS-Only protection enabled.", parsed.recommendedAction)
+
+        if (com.example.BuildConfig.DEBUG) {
+            val testToken = "test-debug-token-12345"
+            val launchIntent = Intent().putExtra("FIREBASE_APPCHECK_DEBUG_TOKEN", testToken)
+            com.example.security.configureAppCheck(context, launchIntent)
+            val persistenceKey = com.google.firebase.FirebaseApp.getInstance().persistenceKey
+            val prefs = context.getSharedPreferences(
+                "com.google.firebase.appcheck.debug.store.$persistenceKey",
+                Context.MODE_PRIVATE,
+            )
+            assertEquals(testToken, prefs.getString("com.google.firebase.appcheck.debug.DEBUG_SECRET", null))
+        }
+    }
+
+    @Test
+    fun `gemini multi-turn chat normalizes history turns and viewModel manages chat state cleanly`() {
+        val audit = com.example.data.repository.PagePrivacyAudit(
+            riskLevel = "Low",
+            summary = "Minimal tracking detected.",
+            privacySignals = listOf("HTTPS active"),
+            recommendedAction = "Keep Tor or tracker blocking enabled.",
+        )
+        val rawHistory = listOf(
+            com.example.data.repository.GeminiChatMessage(
+                role = com.example.data.repository.ChatRole.USER,
+                text = "What trackers were blocked?",
+                promptText = "What trackers were blocked?\n--- Active Browser Tab Context ---\nURL: https://example.org",
+            ),
+            com.example.data.repository.GeminiChatMessage(
+                role = com.example.data.repository.ChatRole.MODEL,
+                text = "Three analytics scripts were blocked.",
+            ),
+            com.example.data.repository.GeminiChatMessage(
+                role = com.example.data.repository.ChatRole.USER,
+                text = "Audit this page",
+            ),
+            com.example.data.repository.GeminiChatMessage(
+                role = com.example.data.repository.ChatRole.MODEL,
+                text = "Minimal tracking detected.",
+                audit = audit,
+            ),
+            // Dangling unanswered user turn (e.g. after a previous network error) should be trimmed
+            com.example.data.repository.GeminiChatMessage(
+                role = com.example.data.repository.ChatRole.USER,
+                text = "Timed out question",
+            ),
+            // Blank message should also be ignored
+            com.example.data.repository.GeminiChatMessage(
+                role = com.example.data.repository.ChatRole.MODEL,
+                text = "   ",
+            ),
+        )
+
+        val normalized = com.example.data.repository.GeminiShieldRepository.normalizeHistoryTurns(rawHistory)
+        assertEquals(4, normalized.size)
+        assertEquals(com.example.data.repository.ChatRole.USER, normalized[0].first)
+        assertTrue(normalized[0].second.contains("https://example.org"))
+        assertEquals(com.example.data.repository.ChatRole.MODEL, normalized[1].first)
+        assertEquals("Three analytics scripts were blocked.", normalized[1].second)
+        assertEquals(com.example.data.repository.ChatRole.MODEL, normalized[3].first)
+        assertTrue(normalized[3].second.contains("Risk: Low"))
+
+        val sdkHistory = com.example.data.repository.GeminiShieldRepository.buildSdkHistory(rawHistory)
+        assertEquals(4, sdkHistory.size)
+        assertEquals("user", sdkHistory[0].role)
+        assertEquals("model", sdkHistory[3].role)
+
+        val vm = com.example.ui.GeminiAssistantViewModel()
+        assertEquals(com.example.ui.GeminiUiState.Idle, vm.uiState.value)
+        assertTrue(vm.messages.value.isEmpty())
+        vm.sendMessage("   ", null)
+        assertEquals(com.example.ui.GeminiUiState.Idle, vm.uiState.value)
+        assertTrue(vm.messages.value.isEmpty())
+        vm.clearChat()
+        assertEquals(com.example.ui.GeminiUiState.Idle, vm.uiState.value)
+    }
 }

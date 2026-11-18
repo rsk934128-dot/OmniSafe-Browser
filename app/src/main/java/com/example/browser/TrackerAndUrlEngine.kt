@@ -19,6 +19,14 @@ object TrackerAndUrlEngine {
         "googleadservices.com",
         "adservice.google.com",
         "imasdk.googleapis.com",
+        "ads.youtube.com",
+        "s0.2mdn.net",
+        "2mdn.net",
+        "fwmrm.net",
+        "innovid.com",
+        "serving-sys.com",
+        "adsafeprotected.com",
+        "doubleverify.com",
         "amazon-adsystem.com",
         "adnxs.com",
         "pubmatic.com",
@@ -115,6 +123,15 @@ object TrackerAndUrlEngine {
         "tiktok.com" to "/i18n/pixel",
         "facebook.com" to "/tr",
         "snapchat.com" to "/scevent",
+        "youtube.com" to "/api/stats/ads",
+        "youtube.com" to "/pagead/",
+        "youtube.com" to "/ptracking",
+        "youtube.com" to "/get_midroll_info",
+        "youtube.com" to "/pcs/activeview",
+        "youtube.com" to "/youtubei/v1/player/ad_break",
+        "youtube-nocookie.com" to "/api/stats/ads",
+        "youtube-nocookie.com" to "/pagead/",
+        "youtube-nocookie.com" to "/ptracking",
     )
 
     private val thirdPartyAdPathMarkers = listOf(
@@ -185,6 +202,14 @@ object TrackerAndUrlEngine {
         if (blockedHostPathRules.any { (ruleHost, rulePath) ->
                 (rawHost == ruleHost || rawHost.endsWith(".$ruleHost")) && path.startsWith(rulePath)
             }
+        ) {
+            return true
+        }
+
+        val query = parsed.encodedQuery?.lowercase().orEmpty()
+        if ((rawHost == "googlevideo.com" || rawHost.endsWith(".googlevideo.com")) &&
+            path.contains("/videoplayback") &&
+            (query.contains("oad=") || query.contains("ad_type=") || query.contains("ctier=l"))
         ) {
             return true
         }

@@ -10,4 +10,6 @@ object Routes {
     const val ROUTE_SESSION_GUARD = "session_guard"
     const val ROUTE_ADMIN_PANEL = "admin_panel"
     const val ROUTE_ADMIN_SETTINGS = "admin_settings"
+    const val ROUTE_VPN_CONNECT = "vpn_connect"
+    const val ROUTE_GEMINI_ASSISTANT = "gemini_assistant"
 }

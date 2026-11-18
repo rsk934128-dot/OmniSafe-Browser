@@ -168,7 +168,11 @@ class AuthenticatedRepositoryUnitTest {
     fun `admin claims verification distinguishes signed out, non-admin denied, and claim-authorized users`(): Unit = runBlocking {
         assertTrue(evaluateAdminClaims(emptyMap()).isEmpty())
         assertTrue(evaluateAdminClaims(mapOf("admin" to false, "role" to "viewer")).isEmpty())
+        assertTrue(com.example.data.repository.hasCustomAdminClaim(mapOf("admin" to true)))
+        assertTrue(com.example.data.repository.hasCustomAdminClaim(mapOf("admin" to "true")))
+        assertFalse(com.example.data.repository.hasCustomAdminClaim(mapOf("admin" to false)))
         assertTrue(evaluateAdminClaims(mapOf("admin" to true)).contains("admin=true"))
+        assertTrue(evaluateAdminClaims(mapOf("admin" to "true")).contains("admin=true"))
         assertTrue(evaluateAdminClaims(mapOf("role" to "ADMIN")).contains("role=ADMIN"))
         assertTrue(evaluateAdminClaims(mapOf("roles" to listOf("editor", "admin"))).contains("roles[admin]"))
         assertTrue(evaluateAdminClaims(mapOf("permissions" to listOf("admin_settings"))).contains("permissions[admin_settings]"))
@@ -256,6 +260,44 @@ class AuthenticatedRepositoryUnitTest {
                 viewModel.filteredLogs.first { list -> list.size == 1 && list.first().severity == MaintenanceLogEntry.SEVERITY_CRITICAL }
             }
             assertEquals("Enabled Emergency Lockdown", criticalOnly.first().action)
+
+            // Wait for VM config to synchronize then toggle privacy overrides via ViewModel methods
+            withTimeout(5000L) {
+                viewModel.configUiState.first { it is AdminConfigUiState.Success && it.existsRemotely }
+            }
+            viewModel.setSeverityFilter(AdminSettingsViewModel.FILTER_ALL)
+            viewModel.toggleEmergencyLockdown(false)
+            val afterLockdownOff = withTimeout(8000L) {
+                viewModel.configUiState.first {
+                    it is AdminConfigUiState.Success && !it.config.emergencyLockdown
+                }
+            } as AdminConfigUiState.Success
+            assertFalse(afterLockdownOff.config.emergencyLockdown)
+
+            // Wait for toggleEmergencyLockdown's audit log write to finish before next toggle
+            withTimeout(8000L) {
+                viewModel.logsUiState.first {
+                    it is MaintenanceLogsUiState.Success &&
+                        it.entries.any { e -> e.action == "Disabled Emergency Lockdown" }
+                }
+            }
+
+            viewModel.toggleForceAdBlockSync(false)
+            val afterAdBlockOff = withTimeout(8000L) {
+                viewModel.configUiState.first {
+                    it is AdminConfigUiState.Success && !it.config.forceAdBlockSync
+                }
+            } as AdminConfigUiState.Success
+            assertFalse(afterAdBlockOff.config.forceAdBlockSync)
+
+            val updatedLogs = withTimeout(8000L) {
+                viewModel.logsUiState.first {
+                    it is MaintenanceLogsUiState.Success &&
+                        it.entries.any { e -> e.action == "Disabled Emergency Lockdown" } &&
+                        it.entries.any { e -> e.action == "Disabled Global Ad-Block Rules Sync" }
+                }
+            } as MaintenanceLogsUiState.Success
+            assertTrue(updatedLogs.entries.any { it.action == "Disabled Global Ad-Block Rules Sync" })
 
             val deleteRes = adminRepo.deleteMaintenanceLog(infoLogId)
             assertTrue(deleteRes.isSuccess)

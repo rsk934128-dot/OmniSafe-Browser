@@ -8,12 +8,12 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.session.MediaSession
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
-import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
@@ -67,13 +67,28 @@ object LiveSessionRuntime {
     private val _isMediaPlaybackActive = MutableStateFlow(false)
     val isMediaPlaybackActive: StateFlow<Boolean> = _isMediaPlaybackActive.asStateFlow()
 
+    private val _hasMediaSession = MutableStateFlow(false)
+    val hasMediaSession: StateFlow<Boolean> = _hasMediaSession.asStateFlow()
+
     private val _activeMediaTitle = MutableStateFlow("")
     val activeMediaTitle: StateFlow<String> = _activeMediaTitle.asStateFlow()
+
+    private val _activeMediaArtist = MutableStateFlow("OnionShield Media")
+    val activeMediaArtist: StateFlow<String> = _activeMediaArtist.asStateFlow()
+
+    private val _activeMediaPositionMs = MutableStateFlow(0L)
+    val activeMediaPositionMs: StateFlow<Long> = _activeMediaPositionMs.asStateFlow()
+
+    private val _activeMediaDurationMs = MutableStateFlow(0L)
+    val activeMediaDurationMs: StateFlow<Long> = _activeMediaDurationMs.asStateFlow()
+
+    private val _activeMediaUrl = MutableStateFlow("")
+    val activeMediaUrl: StateFlow<String> = _activeMediaUrl.asStateFlow()
 
     private val _arePowerLocksHeld = MutableStateFlow(false)
     val arePowerLocksHeld: StateFlow<Boolean> = _arePowerLocksHeld.asStateFlow()
 
-    private val _mediaControlCommands = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 8)
+    private val _mediaControlCommands = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 16)
     val mediaControlCommands: kotlinx.coroutines.flow.Flow<String> = _mediaControlCommands
 
     fun refreshElapsed(nowEpochMs: Long = System.currentTimeMillis()): Long {
@@ -98,7 +113,50 @@ object LiveSessionRuntime {
 
     fun setMediaPlaybackState(active: Boolean, title: String = "") {
         _isMediaPlaybackActive.value = active
-        _activeMediaTitle.value = if (active) title.trim().take(80) else ""
+        if (active) {
+            _hasMediaSession.value = true
+            _activeMediaTitle.value = title.trim().take(100)
+        } else {
+            _activeMediaTitle.value = ""
+            _hasMediaSession.value = false
+        }
+    }
+
+    fun updateMediaSnapshot(
+        isPlaying: Boolean,
+        title: String,
+        artist: String = "OnionShield Media",
+        positionMs: Long = _activeMediaPositionMs.value,
+        durationMs: Long = _activeMediaDurationMs.value,
+        url: String = _activeMediaUrl.value,
+    ) {
+        _isMediaPlaybackActive.value = isPlaying
+        if (isPlaying || title.isNotBlank()) {
+            _hasMediaSession.value = true
+        }
+        if (title.isNotBlank()) {
+            _activeMediaTitle.value = title.trim().take(100)
+        }
+        if (artist.isNotBlank()) {
+            _activeMediaArtist.value = artist.trim().take(80)
+        }
+        if (positionMs >= 0L) {
+            _activeMediaPositionMs.value = positionMs
+        }
+        if (durationMs >= 0L) {
+            _activeMediaDurationMs.value = durationMs
+        }
+        if (url.isNotBlank()) {
+            _activeMediaUrl.value = url
+        }
+    }
+
+    fun clearMediaSession() {
+        _isMediaPlaybackActive.value = false
+        _hasMediaSession.value = false
+        _activeMediaTitle.value = ""
+        _activeMediaPositionMs.value = 0L
+        _activeMediaDurationMs.value = 0L
     }
 
     internal fun emitMediaCommand(command: String) {
@@ -147,6 +205,8 @@ class LiveMonitorForegroundService : Service() {
     private val wakeLockGuard = Any()
     private var partialWakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    internal var mediaSessionHandler: OnionMediaSessionHandler? = null
+        private set
 
     private var latestStats: SessionGuardStats = SessionGuardStats()
     private var latestConfig: SecurityConfig = SecurityConfig()
@@ -154,43 +214,161 @@ class LiveMonitorForegroundService : Service() {
     private var latestTorState: TorProxyState = TorProxyState.Inactive
     private var latestMediaActive: Boolean = false
     private var latestMediaTitle: String = ""
+    private var latestMediaSessionPaused: Boolean = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         ensureNotificationChannel()
+        mediaSessionHandler = OnionMediaSessionHandler(
+            context = applicationContext,
+            onPlayCommand = {
+                LiveSessionRuntime.emitMediaCommand(CMD_PLAY_MEDIA)
+                LiveSessionRuntime.updateMediaSnapshot(
+                    isPlaying = true,
+                    title = LiveSessionRuntime.activeMediaTitle.value.ifBlank { latestMediaTitle },
+                )
+            },
+            onPauseCommand = {
+                LiveSessionRuntime.emitMediaCommand(CMD_PAUSE_MEDIA)
+                LiveSessionRuntime.updateMediaSnapshot(
+                    isPlaying = false,
+                    title = LiveSessionRuntime.activeMediaTitle.value.ifBlank { latestMediaTitle },
+                )
+            },
+            onStopCommand = {
+                LiveSessionRuntime.emitMediaCommand(CMD_STOP_MEDIA)
+                LiveSessionRuntime.clearMediaSession()
+            },
+            onSeekCommand = { posMs ->
+                LiveSessionRuntime.emitMediaCommand("$CMD_SEEK_PREFIX$posMs")
+            },
+            onSkipNextCommand = {
+                LiveSessionRuntime.emitMediaCommand(CMD_NEXT_TRACK)
+            },
+            onSkipPrevCommand = {
+                LiveSessionRuntime.emitMediaCommand(CMD_PREV_TRACK)
+            },
+            onStateChanged = { snap ->
+                latestMediaActive = snap.isPlaying
+                latestMediaTitle = snap.title
+                latestMediaSessionPaused = snap.hasActiveSession && !snap.isPlaying
+                updateNotification(
+                    buildNotification(
+                        stats = latestStats,
+                        config = latestConfig,
+                        syncStatus = latestSyncStatus,
+                        torState = latestTorState,
+                        isMediaActive = latestMediaActive,
+                        mediaTitle = latestMediaTitle,
+                        isMediaPausedSession = latestMediaSessionPaused,
+                        mediaSessionToken = mediaSessionHandler?.sessionToken,
+                    ),
+                )
+            },
+        ).also { it.ensureSession() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         latestMediaActive = LiveSessionRuntime.isMediaPlaybackActive.value
         latestMediaTitle = LiveSessionRuntime.activeMediaTitle.value
+        latestMediaSessionPaused = !latestMediaActive && LiveSessionRuntime.hasMediaSession.value
         when (intent?.action) {
             ACTION_STOP -> {
                 stopAndClearPreference()
                 return START_NOT_STICKY
             }
             ACTION_PAUSE_MEDIA -> {
-                LiveSessionRuntime.emitMediaCommand(CMD_PAUSE_MEDIA)
-                LiveSessionRuntime.setMediaPlaybackState(false)
+                mediaSessionHandler?.handlePauseFromSession(abandonFocus = false)
                 latestMediaActive = false
-                latestMediaTitle = ""
-                promoteToForeground(buildNotification(latestStats, latestConfig, latestSyncStatus, latestTorState, false, ""))
+                latestMediaSessionPaused = true
+                promoteToForeground(
+                    buildNotification(
+                        stats = latestStats,
+                        config = latestConfig,
+                        syncStatus = latestSyncStatus,
+                        torState = latestTorState,
+                        isMediaActive = false,
+                        mediaTitle = latestMediaTitle,
+                        isMediaPausedSession = true,
+                        mediaSessionToken = mediaSessionHandler?.sessionToken,
+                    ),
+                )
+                return START_STICKY
+            }
+            ACTION_RESUME_MEDIA -> {
+                acquireWakeAndWifiLocks()
+                mediaSessionHandler?.handlePlayFromSession()
+                latestMediaActive = true
+                latestMediaSessionPaused = false
+                promoteToForeground(
+                    buildNotification(
+                        stats = latestStats,
+                        config = latestConfig,
+                        syncStatus = latestSyncStatus,
+                        torState = latestTorState,
+                        isMediaActive = true,
+                        mediaTitle = latestMediaTitle,
+                        isMediaPausedSession = false,
+                        mediaSessionToken = mediaSessionHandler?.sessionToken,
+                    ),
+                )
                 return START_STICKY
             }
             ACTION_NEW_CIRCUIT -> {
-                promoteToForeground(buildNotification(latestStats, latestConfig, latestSyncStatus, latestTorState, latestMediaActive, latestMediaTitle))
+                promoteToForeground(
+                    buildNotification(
+                        stats = latestStats,
+                        config = latestConfig,
+                        syncStatus = latestSyncStatus,
+                        torState = latestTorState,
+                        isMediaActive = latestMediaActive,
+                        mediaTitle = latestMediaTitle,
+                        isMediaPausedSession = latestMediaSessionPaused,
+                        mediaSessionToken = mediaSessionHandler?.sessionToken,
+                    ),
+                )
                 LiveSessionRuntime.setForegroundRunning(true)
                 acquireWakeAndWifiLocks()
+                if (latestMediaActive) {
+                    mediaSessionHandler?.updatePlayback(
+                        title = latestMediaTitle,
+                        artist = LiveSessionRuntime.activeMediaArtist.value,
+                        isPlaying = true,
+                        positionMs = LiveSessionRuntime.activeMediaPositionMs.value,
+                        durationMs = LiveSessionRuntime.activeMediaDurationMs.value,
+                    )
+                }
                 startMonitoringLoopsIfNeeded()
                 triggerNewTorCircuit()
                 return START_STICKY
             }
             else -> {
                 // Immediately promote to foreground within Android 14+ startup deadline
-                promoteToForeground(buildNotification(latestStats, latestConfig, latestSyncStatus, latestTorState, latestMediaActive, latestMediaTitle))
+                promoteToForeground(
+                    buildNotification(
+                        stats = latestStats,
+                        config = latestConfig,
+                        syncStatus = latestSyncStatus,
+                        torState = latestTorState,
+                        isMediaActive = latestMediaActive,
+                        mediaTitle = latestMediaTitle,
+                        isMediaPausedSession = latestMediaSessionPaused,
+                        mediaSessionToken = mediaSessionHandler?.sessionToken,
+                    ),
+                )
                 LiveSessionRuntime.setForegroundRunning(true)
                 acquireWakeAndWifiLocks()
+                if (latestMediaActive) {
+                    mediaSessionHandler?.updatePlayback(
+                        title = latestMediaTitle,
+                        artist = LiveSessionRuntime.activeMediaArtist.value,
+                        isPlaying = true,
+                        positionMs = LiveSessionRuntime.activeMediaPositionMs.value,
+                        durationMs = LiveSessionRuntime.activeMediaDurationMs.value,
+                    )
+                }
                 startMonitoringLoopsIfNeeded()
                 return START_STICKY
             }
@@ -226,7 +404,16 @@ class LiveMonitorForegroundService : Service() {
                                 LiveSessionRuntime.updateTorProxyState(nextTorState)
                             }
                             updateNotification(
-                                buildNotification(latestStats, cfg, latestSyncStatus, latestTorState),
+                                buildNotification(
+                                    stats = latestStats,
+                                    config = cfg,
+                                    syncStatus = latestSyncStatus,
+                                    torState = latestTorState,
+                                    isMediaActive = latestMediaActive,
+                                    mediaTitle = latestMediaTitle,
+                                    isMediaPausedSession = latestMediaSessionPaused,
+                                    mediaSessionToken = mediaSessionHandler?.sessionToken,
+                                ),
                             )
                             delay(cfg.circuitPrivacyLevel.livePollIntervalMs)
                         }
@@ -234,7 +421,16 @@ class LiveMonitorForegroundService : Service() {
                         latestTorState = TorProxyState.Inactive
                         LiveSessionRuntime.updateTorProxyState(TorProxyState.Inactive)
                         updateNotification(
-                            buildNotification(latestStats, cfg, latestSyncStatus, latestTorState),
+                            buildNotification(
+                                stats = latestStats,
+                                config = cfg,
+                                syncStatus = latestSyncStatus,
+                                torState = latestTorState,
+                                isMediaActive = latestMediaActive,
+                                mediaTitle = latestMediaTitle,
+                                isMediaPausedSession = latestMediaSessionPaused,
+                                mediaSessionToken = mediaSessionHandler?.sessionToken,
+                            ),
                         )
                     }
                 }
@@ -293,7 +489,18 @@ class LiveMonitorForegroundService : Service() {
                 activeSyncService.syncStatus.collectLatest { status ->
                     latestSyncStatus = status
                     LiveSessionRuntime.updateForegroundSyncStatus(status)
-                    updateNotification(buildNotification(latestStats, latestConfig, status, latestTorState))
+                    updateNotification(
+                        buildNotification(
+                            stats = latestStats,
+                            config = latestConfig,
+                            syncStatus = status,
+                            torState = latestTorState,
+                            isMediaActive = latestMediaActive,
+                            mediaTitle = latestMediaTitle,
+                            isMediaPausedSession = latestMediaSessionPaused,
+                            mediaSessionToken = mediaSessionHandler?.sessionToken,
+                        ),
+                    )
                 }
             }
         }
@@ -302,11 +509,44 @@ class LiveMonitorForegroundService : Service() {
             mediaStateJob = scope.launch {
                 combine(
                     LiveSessionRuntime.isMediaPlaybackActive,
+                    LiveSessionRuntime.hasMediaSession,
                     LiveSessionRuntime.activeMediaTitle,
-                ) { active, title -> active to title }.collectLatest { (active, title) ->
-                    latestMediaActive = active
-                    latestMediaTitle = title
-                    updateNotification(buildNotification(latestStats, latestConfig, latestSyncStatus, latestTorState, active, title))
+                    LiveSessionRuntime.activeMediaArtist,
+                    LiveSessionRuntime.activeMediaPositionMs,
+                ) { active, hasSession, title, artist, posMs ->
+                    MediaPlaybackSnapshot(
+                        isPlaying = active,
+                        hasActiveSession = hasSession,
+                        title = title,
+                        artist = artist,
+                        positionMs = posMs,
+                        durationMs = LiveSessionRuntime.activeMediaDurationMs.value,
+                    )
+                }.collectLatest { snap ->
+                    latestMediaActive = snap.isPlaying
+                    latestMediaTitle = snap.title
+                    latestMediaSessionPaused = snap.hasActiveSession && !snap.isPlaying
+                    if (snap.hasActiveSession) {
+                        mediaSessionHandler?.updatePlayback(
+                            title = snap.title,
+                            artist = snap.artist,
+                            isPlaying = snap.isPlaying,
+                            positionMs = snap.positionMs,
+                            durationMs = snap.durationMs,
+                        )
+                    }
+                    updateNotification(
+                        buildNotification(
+                            stats = latestStats,
+                            config = latestConfig,
+                            syncStatus = latestSyncStatus,
+                            torState = latestTorState,
+                            isMediaActive = snap.isPlaying,
+                            mediaTitle = snap.title,
+                            isMediaPausedSession = latestMediaSessionPaused,
+                            mediaSessionToken = mediaSessionHandler?.sessionToken,
+                        ),
+                    )
                 }
             }
         }
@@ -315,7 +555,18 @@ class LiveMonitorForegroundService : Service() {
             statsFlow.collectLatest { (cfg, stats) ->
                 latestConfig = cfg
                 latestStats = stats
-                updateNotification(buildNotification(stats, cfg, latestSyncStatus, latestTorState, latestMediaActive, latestMediaTitle))
+                updateNotification(
+                    buildNotification(
+                        stats = stats,
+                        config = cfg,
+                        syncStatus = latestSyncStatus,
+                        torState = latestTorState,
+                        isMediaActive = latestMediaActive,
+                        mediaTitle = latestMediaTitle,
+                        isMediaPausedSession = latestMediaSessionPaused,
+                        mediaSessionToken = mediaSessionHandler?.sessionToken,
+                    ),
+                )
             }
         }
     }
@@ -351,12 +602,25 @@ class LiveMonitorForegroundService : Service() {
             val refreshed = checkTorConnectivityOnce(cfg)
             latestTorState = refreshed
             LiveSessionRuntime.updateTorProxyState(refreshed)
-            updateNotification(buildNotification(latestStats, cfg, latestSyncStatus, refreshed))
+            updateNotification(
+                buildNotification(
+                    stats = latestStats,
+                    config = cfg,
+                    syncStatus = latestSyncStatus,
+                    torState = refreshed,
+                    isMediaActive = latestMediaActive,
+                    mediaTitle = latestMediaTitle,
+                    isMediaPausedSession = latestMediaSessionPaused,
+                    mediaSessionToken = mediaSessionHandler?.sessionToken,
+                ),
+            )
         }
     }
 
     private fun stopAndClearPreference() {
         LiveSessionRuntime.setForegroundRunning(false)
+        mediaSessionHandler?.release()
+        mediaSessionHandler = null
         releaseWakeAndWifiLocks()
         tickerJob?.cancel()
         tickerJob = null
@@ -383,6 +647,8 @@ class LiveMonitorForegroundService : Service() {
 
     override fun onDestroy() {
         LiveSessionRuntime.setForegroundRunning(false)
+        mediaSessionHandler?.release()
+        mediaSessionHandler = null
         releaseWakeAndWifiLocks()
         tickerJob?.cancel()
         torKeepAliveJob?.cancel()
@@ -509,6 +775,8 @@ class LiveMonitorForegroundService : Service() {
         torState: TorProxyState = TorProxyState.Inactive,
         isMediaActive: Boolean = false,
         mediaTitle: String = "",
+        isMediaPausedSession: Boolean = false,
+        mediaSessionToken: MediaSession.Token? = null,
     ): Notification {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -549,8 +817,9 @@ class LiveMonitorForegroundService : Service() {
             else -> "Sync Ready"
         }
 
+        val showMediaPresentation = isMediaActive || isMediaPausedSession
         val summaryLine = buildString {
-            if (isMediaActive) {
+            if (showMediaPresentation) {
                 val trackLabel = mediaTitle.ifBlank { "Background Media Audio" }
                 append("♪ $trackLabel • ")
             }
@@ -563,23 +832,34 @@ class LiveMonitorForegroundService : Service() {
         }
 
         val titleRes = when {
-            isMediaActive -> R.string.live_monitor_notif_media_title
+            showMediaPresentation -> R.string.live_monitor_notif_media_title
             isTorMode -> R.string.live_monitor_notif_tor_title
             else -> R.string.live_monitor_notif_title
         }
 
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
             .setSmallIcon(R.drawable.ic_shield_notify)
             .setContentTitle(getString(titleRes))
             .setContentText(summaryLine)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(summaryLine))
-            .setOngoing(true)
+            .setOngoing(isMediaActive || !isMediaPausedSession)
             .setOnlyAlertOnce(true)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setCategory(
-                if (isMediaActive) NotificationCompat.CATEGORY_TRANSPORT else NotificationCompat.CATEGORY_SERVICE,
+                if (showMediaPresentation) Notification.CATEGORY_TRANSPORT else Notification.CATEGORY_SERVICE,
             )
             .setContentIntent(openPendingIntent)
-            .addAction(0, getString(R.string.live_monitor_stop_action), stopPendingIntent)
+            .addAction(
+                Notification.Action.Builder(
+                    null,
+                    getString(R.string.live_monitor_stop_action),
+                    stopPendingIntent,
+                ).build(),
+            )
 
         if (isMediaActive) {
             val pauseMediaIntent = Intent(this, LiveMonitorForegroundService::class.java)
@@ -590,7 +870,29 @@ class LiveMonitorForegroundService : Service() {
                 pauseMediaIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-            builder.addAction(0, getString(R.string.live_monitor_pause_media_action), pauseMediaPendingIntent)
+            builder.addAction(
+                Notification.Action.Builder(
+                    null,
+                    getString(R.string.live_monitor_pause_media_action),
+                    pauseMediaPendingIntent,
+                ).build(),
+            )
+        } else if (isMediaPausedSession) {
+            val resumeMediaIntent = Intent(this, LiveMonitorForegroundService::class.java)
+                .setAction(ACTION_RESUME_MEDIA)
+            val resumeMediaPendingIntent = PendingIntent.getService(
+                this,
+                REQUEST_CODE_RESUME_MEDIA,
+                resumeMediaIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(
+                Notification.Action.Builder(
+                    null,
+                    getString(R.string.live_monitor_resume_media_action),
+                    resumeMediaPendingIntent,
+                ).build(),
+            )
         }
 
         if (isTorMode) {
@@ -602,7 +904,23 @@ class LiveMonitorForegroundService : Service() {
                 newCircuitIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-            builder.addAction(0, getString(R.string.live_monitor_new_circuit_action), newCircuitPendingIntent)
+            builder.addAction(
+                Notification.Action.Builder(
+                    null,
+                    getString(R.string.live_monitor_new_circuit_action),
+                    newCircuitPendingIntent,
+                ).build(),
+            )
+        }
+
+        if (showMediaPresentation && mediaSessionToken != null) {
+            builder.setStyle(
+                Notification.MediaStyle()
+                    .setMediaSession(mediaSessionToken)
+                    .setShowActionsInCompactView(0, 1),
+            )
+        } else {
+            builder.setStyle(Notification.BigTextStyle().bigText(summaryLine))
         }
 
         return builder.build()
@@ -615,7 +933,13 @@ class LiveMonitorForegroundService : Service() {
         const val ACTION_STOP = "com.example.action.STOP_LIVE_MONITOR"
         const val ACTION_NEW_CIRCUIT = "com.example.action.NEW_TOR_CIRCUIT"
         const val ACTION_PAUSE_MEDIA = "com.example.action.PAUSE_MEDIA"
+        const val ACTION_RESUME_MEDIA = "com.example.action.RESUME_MEDIA"
         const val CMD_PAUSE_MEDIA = "PAUSE_MEDIA"
+        const val CMD_PLAY_MEDIA = "PLAY_MEDIA"
+        const val CMD_STOP_MEDIA = "STOP_MEDIA"
+        const val CMD_SEEK_PREFIX = "SEEK_MEDIA:"
+        const val CMD_NEXT_TRACK = "NEXT_TRACK"
+        const val CMD_PREV_TRACK = "PREV_TRACK"
         private const val TAG = "LiveMonitorFGS"
         private const val PARTIAL_WAKE_LOCK_TAG = "OnionShield:MediaStreamWakeLock"
         private const val WIFI_LOCK_TAG = "OnionShield:MediaStreamWifiLock"
@@ -623,6 +947,7 @@ class LiveMonitorForegroundService : Service() {
         private const val REQUEST_CODE_STOP = 101
         private const val REQUEST_CODE_NEW_CIRCUIT = 102
         private const val REQUEST_CODE_PAUSE_MEDIA = 103
+        private const val REQUEST_CODE_RESUME_MEDIA = 104
 
         fun start(context: Context) {
             val intent = Intent(context, LiveMonitorForegroundService::class.java).setAction(ACTION_START)

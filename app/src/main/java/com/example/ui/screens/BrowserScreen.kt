@@ -37,6 +37,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.AddToHomeScreen
 import androidx.compose.material.icons.rounded.AdminPanelSettings
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Close
@@ -59,11 +60,14 @@ import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Timer
+import androidx.compose.material.icons.rounded.VpnKey
+import androidx.compose.material.icons.rounded.VpnLock
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -110,6 +114,7 @@ import com.example.data.ABOUT_START_URL
 import com.example.data.BrowserMode
 import com.example.data.BrowserTab
 import com.example.data.TorProxyState
+import com.example.data.VpnTunnelStatus
 import com.example.ui.BrowserUiState
 import com.example.ui.BrowserViewModel
 import com.example.ui.components.BrowserWebView
@@ -138,6 +143,8 @@ fun BrowserScreen(
     onOpenSessionGuard: () -> Unit = {},
     onOpenAdminPanel: () -> Unit = {},
     onOpenAdminSettings: () -> Unit = {},
+    onOpenVpnConnect: () -> Unit = {},
+    onOpenGeminiAssistant: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -149,6 +156,7 @@ fun BrowserScreen(
     val sessionGuardStats by viewModel.sessionGuardStats.collectAsStateWithLifecycle()
     val isForegroundServiceRunning by viewModel.isForegroundServiceRunning.collectAsStateWithLifecycle()
     val isMediaPlaybackActive by viewModel.isMediaPlaybackActive.collectAsStateWithLifecycle()
+    val vpnTunnelStatus by viewModel.vpnTunnelStatus.collectAsStateWithLifecycle()
     var mediaNotifPromptDismissed by remember { mutableStateOf(false) }
     var hasNotifPerm by remember {
         mutableStateOf(
@@ -257,6 +265,37 @@ fun BrowserScreen(
                                         fontWeight = FontWeight.Bold,
                                     )
                                 }
+                            }
+                        }
+
+                        val isVpnConnected = vpnTunnelStatus is VpnTunnelStatus.Connected
+                        val vpnChipColor = if (isVpnConnected) shieldColors.secureGreen else shieldColors.surfaceAccent
+                        Surface(
+                            shape = CircleShape,
+                            color = vpnChipColor.copy(alpha = if (isVpnConnected) 0.18f else 0.11f),
+                            border = BorderStroke(1.dp, vpnChipColor.copy(alpha = 0.55f)),
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .clickable(onClick = onOpenVpnConnect)
+                                .testTag("top_vpn_chip"),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (isVpnConnected) Icons.Rounded.VpnLock else Icons.Rounded.VpnKey,
+                                    contentDescription = "Internet VPN",
+                                    tint = vpnChipColor,
+                                    modifier = Modifier.size(13.dp),
+                                )
+                                Text(
+                                    text = if (isVpnConnected) "VPN ON" else "VPN",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = vpnChipColor,
+                                    fontWeight = FontWeight.Bold,
+                                )
                             }
                         }
 
@@ -597,6 +636,21 @@ fun BrowserScreen(
                                     )
                                 }
                                 DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.gemini_ai_menu_item)) },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Rounded.AutoAwesome,
+                                            contentDescription = null,
+                                            tint = accentColor,
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("menu_gemini_assistant"),
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        onOpenGeminiAssistant()
+                                    },
+                                )
+                                DropdownMenuItem(
                                     text = { Text("Scan QR Code URL") },
                                     leadingIcon = { Icon(Icons.Rounded.QrCodeScanner, contentDescription = null) },
                                     modifier = Modifier.testTag("menu_scan_qr"),
@@ -604,6 +658,23 @@ fun BrowserScreen(
                                         showOverflowMenu = false
                                         focusManager.clearFocus()
                                         showQrScanner = true
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            if (vpnTunnelStatus is VpnTunnelStatus.Connected) {
+                                                "Internet VPN & Web Links (ON)"
+                                            } else {
+                                                "Internet VPN & Web Links"
+                                            },
+                                        )
+                                    },
+                                    leadingIcon = { Icon(Icons.Rounded.VpnKey, contentDescription = null) },
+                                    modifier = Modifier.testTag("menu_vpn_connect"),
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        onOpenVpnConnect()
                                     },
                                 )
                                 HorizontalDivider()
@@ -696,6 +767,22 @@ fun BrowserScreen(
                 }
             }
         },
+        floatingActionButton = {
+            if (fullscreenCustomView == null && !uiState.isOmniboxFocused) {
+                FloatingActionButton(
+                    onClick = onOpenGeminiAssistant,
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.testTag("gemini_chat_fab"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoAwesome,
+                        contentDescription = stringResource(R.string.cd_open_gemini_chat),
+                    )
+                }
+            }
+        },
     ) { innerPadding ->
         Box(
             modifier = Modifier
@@ -727,6 +814,10 @@ fun BrowserScreen(
                     onTogglePopupBlocker = viewModel::setPopupBlocker,
                     onTestTorSocket = viewModel::testTorProxyConnection,
                     onOpenSecuritySettings = onOpenSecuritySettings,
+                    vpnStatus = vpnTunnelStatus,
+                    onConnectVpnAfterConsent = viewModel::startVpnTunnelAfterConsent,
+                    onDisconnectVpn = viewModel::stopVpnTunnel,
+                    onOpenVpnHub = onOpenVpnConnect,
                 )
             } else {
                 val cfg = uiState.securityConfig
@@ -1059,7 +1150,7 @@ fun BrowserScreen(
                 visible = uiState.statusBannerMessage != null,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(12.dp),
+                    .padding(start = 12.dp, end = 88.dp, bottom = 12.dp),
             ) {
                 uiState.statusBannerMessage?.let { message ->
                     Snackbar(

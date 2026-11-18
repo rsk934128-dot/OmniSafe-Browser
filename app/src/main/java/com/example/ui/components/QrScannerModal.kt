@@ -220,6 +220,7 @@ fun QrScannerModal(
                 AndroidView(
                     factory = { viewCtx ->
                         PreviewView(viewCtx).apply {
+                            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                             controller = cameraController
                             scaleType = PreviewView.ScaleType.FILL_CENTER
                         }

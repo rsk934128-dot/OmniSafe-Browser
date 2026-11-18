@@ -38,10 +38,15 @@ sealed interface AdminClaimStatus {
     ) : AdminClaimStatus
 }
 
+fun hasCustomAdminClaim(claims: Map<String, Any?>): Boolean {
+    val adminClaim = claims["admin"]
+    return adminClaim == true || (adminClaim as? String)?.trim().equals("true", ignoreCase = true)
+}
+
 fun evaluateAdminClaims(claims: Map<String, Any?>): Set<String> {
     if (claims.isEmpty()) return emptySet()
     val matched = linkedSetOf<String>()
-    if (claims["admin"] == true) {
+    if (hasCustomAdminClaim(claims)) {
         matched += "admin=true"
     }
     if (claims["isAdmin"] == true) {
@@ -111,7 +116,7 @@ class FirebaseAuthContextProvider(
             } else {
                 AdminClaimStatus.Denied(
                     user = userContext,
-                    reason = "Account lacks required admin user claim (admin=true or role=\"admin\").",
+                    reason = "Your Firebase Auth profile lacks the custom 'admin' claim (admin: true).",
                 )
             }
         } catch (e: CancellationException) {
@@ -119,7 +124,7 @@ class FirebaseAuthContextProvider(
         } catch (e: Exception) {
             AdminClaimStatus.Denied(
                 user = userContext,
-                reason = e.localizedMessage ?: "Unable to verify Firebase ID token claims.",
+                reason = e.localizedMessage ?: "Unable to verify Firebase ID token custom 'admin' claim.",
             )
         }
     }

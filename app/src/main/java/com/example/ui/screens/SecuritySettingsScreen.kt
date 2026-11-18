@@ -76,6 +76,7 @@ import com.example.data.SecurityConfig
 import com.example.ui.BrowserUiState
 import com.example.ui.BrowserViewModel
 import com.example.ui.components.BackgroundKeepAliveCard
+import com.example.ui.components.BatteryOptimizationCard
 import com.example.ui.components.CircuitDiagnosticSheet
 import com.example.ui.components.CircuitPrivacyLevelCard
 import com.example.ui.components.CustomExceptionsAndAdBlockCard
@@ -90,6 +91,7 @@ fun SecuritySettingsScreen(
     uiState: BrowserUiState,
     viewModel: BrowserViewModel,
     onOpenAdminPanel: () -> Unit = {},
+    onOpenAdminSettings: () -> Unit = {},
     onNavigateBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -160,19 +162,36 @@ fun SecuritySettingsScreen(
                 )
             }
 
-            // Admin Panel Quick Access Card
+            // Admin Panel & Protected Admin Settings Quick Access
             item {
-                OutlinedButton(
-                    onClick = onOpenAdminPanel,
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .widthIn(max = 640.dp)
-                        .height(48.dp)
-                        .testTag("settings_open_admin_panel_button"),
+                        .widthIn(max = 640.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(Icons.Rounded.AdminPanelSettings, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Open Admin Panel (Governance & Telemetry)")
+                    OutlinedButton(
+                        onClick = onOpenAdminPanel,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("settings_open_admin_panel_button"),
+                    ) {
+                        Icon(Icons.Rounded.AdminPanelSettings, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Open Admin Panel (Governance & Telemetry)")
+                    }
+                    OutlinedButton(
+                        onClick = onOpenAdminSettings,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("settings_open_admin_settings_button"),
+                    ) {
+                        Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Server Admin Settings ('admin' Claim Required)")
+                    }
                 }
             }
 
@@ -373,6 +392,11 @@ fun SecuritySettingsScreen(
                         }
                     },
                 )
+            }
+
+            // 4b. Battery Optimization Exemption Guide for Background Media & Foreground Service
+            item {
+                BatteryOptimizationCard()
             }
 
             // 5. Tor Proxy Routing & Circuit Level
