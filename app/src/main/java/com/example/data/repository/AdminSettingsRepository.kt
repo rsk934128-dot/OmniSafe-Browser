@@ -19,12 +19,14 @@ import com.google.firebase.firestore.Source
 import com.google.firebase.firestore.snapshots
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 @Keep
@@ -124,15 +126,15 @@ class AdminSettingsRepository(
             ?: throw IllegalStateException("Admin authentication is required before accessing server settings.")
     }
 
-    suspend fun hasTrustedAdminDocument(uid: String): Boolean {
-        if (uid.isBlank()) return false
+    suspend fun hasTrustedAdminDocument(uid: String): Boolean = withContext(Dispatchers.IO) {
+        if (uid.isBlank()) return@withContext false
         val docRef = db.collection("admins").document(uid)
         val cached = runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
-        if (cached?.exists() == true) return true
+        if (cached?.exists() == true) return@withContext true
         val remote = withTimeoutOrNull(OFFLINE_CHECK_TIMEOUT_MS) {
             runCatching { docRef.get(Source.DEFAULT).await() }.getOrNull()
         }
-        return remote?.exists() == true
+        remote?.exists() == true
     }
 
     fun observeServerConfig(
@@ -213,8 +215,8 @@ class AdminSettingsRepository(
         auditCategory: String = MaintenanceLogEntry.CATEGORY_CONFIG,
         auditSeverity: String = MaintenanceLogEntry.SEVERITY_INFO,
         auditDetails: String = "",
-    ): Result<Unit> {
-        val user = runCatching { requireAuthenticatedUser() }.getOrElse { return Result.failure(it) }
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val user = runCatching { requireAuthenticatedUser() }.getOrElse { return@withContext Result.failure(it) }
         val configId = sanitizeDocId(config.id).ifBlank { AdminServerConfig.DEFAULT_CONFIG_ID }
         val docRef = db.collection("admin_config").document(configId)
         val cleanBanner = config.maintenanceBanner.trim().take(MAX_BANNER_LENGTH)
@@ -230,7 +232,7 @@ class AdminSettingsRepository(
             "updatedAt" to FieldValue.serverTimestamp(),
         )
 
-        return try {
+        try {
             val cachedSnap = runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
             val existing = if (cachedSnap != null && cachedSnap.exists()) {
                 cachedSnap
@@ -275,11 +277,11 @@ class AdminSettingsRepository(
         category: String = MaintenanceLogEntry.CATEGORY_MAINTENANCE,
         severity: String = MaintenanceLogEntry.SEVERITY_INFO,
         details: String = "",
-    ): Result<String> {
-        val user = runCatching { requireAuthenticatedUser() }.getOrElse { return Result.failure(it) }
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val user = runCatching { requireAuthenticatedUser() }.getOrElse { return@withContext Result.failure(it) }
         val cleanAction = action.trim().take(MAX_ACTION_LENGTH)
         if (cleanAction.isEmpty()) {
-            return Result.failure(IllegalArgumentException("Maintenance log action cannot be blank."))
+            return@withContext Result.failure(IllegalArgumentException("Maintenance log action cannot be blank."))
         }
         val cleanCategory = category.trim().uppercase().takeIf {
             it in MaintenanceLogEntry.VALID_CATEGORIES
@@ -305,7 +307,7 @@ class AdminSettingsRepository(
             "updatedAt" to FieldValue.serverTimestamp(),
         )
 
-        return try {
+        try {
             withTimeoutOrNull(OFFLINE_WRITE_ACK_TIMEOUT_MS) {
                 docRef.set(payload).await()
             }
@@ -318,14 +320,14 @@ class AdminSettingsRepository(
         }
     }
 
-    suspend fun deleteMaintenanceLog(logId: String): Result<Unit> {
-        runCatching { requireAuthenticatedUser() }.getOrElse { return Result.failure(it) }
+    suspend fun deleteMaintenanceLog(logId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching { requireAuthenticatedUser() }.getOrElse { return@withContext Result.failure(it) }
         val cleanId = sanitizeDocId(logId)
         if (cleanId.isEmpty()) {
-            return Result.failure(IllegalArgumentException("Invalid maintenance log ID."))
+            return@withContext Result.failure(IllegalArgumentException("Invalid maintenance log ID."))
         }
         val docRef = db.collection("maintenance_logs").document(cleanId)
-        return try {
+        try {
             withTimeoutOrNull(OFFLINE_WRITE_ACK_TIMEOUT_MS) {
                 docRef.delete().await()
             }
