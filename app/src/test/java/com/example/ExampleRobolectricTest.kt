@@ -1132,6 +1132,19 @@ class ExampleRobolectricTest {
         assertEquals("Keep standard HTTPS-Only protection enabled.", parsed.recommendedAction)
 
         if (com.example.BuildConfig.DEBUG) {
+            if (com.google.firebase.FirebaseApp.getApps(context)
+                    .none { it.name == com.google.firebase.FirebaseApp.DEFAULT_APP_NAME }
+            ) {
+                com.google.firebase.FirebaseApp.initializeApp(context)
+                    ?: com.google.firebase.FirebaseApp.initializeApp(
+                        context,
+                        com.google.firebase.FirebaseOptions.Builder()
+                            .setApplicationId("com.aistudio.onionshield.kxrqzm")
+                            .setProjectId("demo-robolectric-test")
+                            .setApiKey("fake-api-key-for-robolectric-test")
+                            .build(),
+                    )
+            }
             val testToken = "test-debug-token-12345"
             val launchIntent = Intent().putExtra("FIREBASE_APPCHECK_DEBUG_TOKEN", testToken)
             com.example.security.configureAppCheck(context, launchIntent)
