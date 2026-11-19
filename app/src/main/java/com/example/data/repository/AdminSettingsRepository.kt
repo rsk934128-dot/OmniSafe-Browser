@@ -102,11 +102,33 @@ data class MaintenanceLogsSnapshot(
     val hasPendingWrites: Boolean = false,
 )
 
+interface AdminSettingsDataSource {
+    suspend fun hasTrustedAdminDocument(uid: String): Boolean
+    fun observeServerConfig(
+        configId: String = AdminServerConfig.DEFAULT_CONFIG_ID,
+    ): Flow<AdminServerConfigSnapshot>
+    fun observeMaintenanceLogs(limitCount: Long = 50L): Flow<MaintenanceLogsSnapshot>
+    suspend fun saveServerConfig(
+        config: AdminServerConfig,
+        auditAction: String? = null,
+        auditCategory: String = MaintenanceLogEntry.CATEGORY_CONFIG,
+        auditSeverity: String = MaintenanceLogEntry.SEVERITY_INFO,
+        auditDetails: String = "",
+    ): Result<Unit>
+    suspend fun appendMaintenanceLog(
+        action: String,
+        category: String = MaintenanceLogEntry.CATEGORY_MAINTENANCE,
+        severity: String = MaintenanceLogEntry.SEVERITY_INFO,
+        details: String = "",
+    ): Result<String>
+    suspend fun deleteMaintenanceLog(logId: String): Result<Unit>
+}
+
 class AdminSettingsRepository(
     private val db: FirebaseFirestore,
     private val auth: FirebaseAuth = Firebase.auth,
     private val authContextProvider: AuthContextProvider = FirebaseAuthContextProvider(auth),
-) {
+) : AdminSettingsDataSource {
     constructor(
         db: FirebaseFirestore,
         authContextProvider: AuthContextProvider,
@@ -126,7 +148,7 @@ class AdminSettingsRepository(
             ?: throw IllegalStateException("Admin authentication is required before accessing server settings.")
     }
 
-    suspend fun hasTrustedAdminDocument(uid: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun hasTrustedAdminDocument(uid: String): Boolean = withContext(Dispatchers.IO) {
         if (uid.isBlank()) return@withContext false
         val docRef = db.collection("admins").document(uid)
         val cached = runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
@@ -137,8 +159,8 @@ class AdminSettingsRepository(
         remote?.exists() == true
     }
 
-    fun observeServerConfig(
-        configId: String = AdminServerConfig.DEFAULT_CONFIG_ID,
+    override fun observeServerConfig(
+        configId: String,
     ): Flow<AdminServerConfigSnapshot> = flow {
         val docPath = "admin_config/$configId"
         emitAll(
@@ -175,7 +197,7 @@ class AdminSettingsRepository(
         )
     }
 
-    fun observeMaintenanceLogs(limitCount: Long = 50L): Flow<MaintenanceLogsSnapshot> = flow {
+    override fun observeMaintenanceLogs(limitCount: Long): Flow<MaintenanceLogsSnapshot> = flow {
         val collectionPath = "maintenance_logs"
         emitAll(
             db.collection(collectionPath)
@@ -209,12 +231,12 @@ class AdminSettingsRepository(
         )
     }
 
-    suspend fun saveServerConfig(
+    override suspend fun saveServerConfig(
         config: AdminServerConfig,
-        auditAction: String? = null,
-        auditCategory: String = MaintenanceLogEntry.CATEGORY_CONFIG,
-        auditSeverity: String = MaintenanceLogEntry.SEVERITY_INFO,
-        auditDetails: String = "",
+        auditAction: String?,
+        auditCategory: String,
+        auditSeverity: String,
+        auditDetails: String,
     ): Result<Unit> = withContext(Dispatchers.IO) {
         val user = runCatching { requireAuthenticatedUser() }.getOrElse { return@withContext Result.failure(it) }
         val configId = sanitizeDocId(config.id).ifBlank { AdminServerConfig.DEFAULT_CONFIG_ID }
@@ -272,11 +294,11 @@ class AdminSettingsRepository(
         }
     }
 
-    suspend fun appendMaintenanceLog(
+    override suspend fun appendMaintenanceLog(
         action: String,
-        category: String = MaintenanceLogEntry.CATEGORY_MAINTENANCE,
-        severity: String = MaintenanceLogEntry.SEVERITY_INFO,
-        details: String = "",
+        category: String,
+        severity: String,
+        details: String,
     ): Result<String> = withContext(Dispatchers.IO) {
         val user = runCatching { requireAuthenticatedUser() }.getOrElse { return@withContext Result.failure(it) }
         val cleanAction = action.trim().take(MAX_ACTION_LENGTH)
@@ -320,7 +342,7 @@ class AdminSettingsRepository(
         }
     }
 
-    suspend fun deleteMaintenanceLog(logId: String): Result<Unit> = withContext(Dispatchers.IO) {
+    override suspend fun deleteMaintenanceLog(logId: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching { requireAuthenticatedUser() }.getOrElse { return@withContext Result.failure(it) }
         val cleanId = sanitizeDocId(logId)
         if (cleanId.isEmpty()) {
