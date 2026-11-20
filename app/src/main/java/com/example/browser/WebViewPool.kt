@@ -59,6 +59,10 @@ internal class BackgroundCapableWebView(context: Context) : WebView(context) {
             requestedVisibility
         }
 
+    override fun dispatchWindowVisibilityChanged(visibility: Int) {
+        super.dispatchWindowVisibilityChanged(resolveEffectiveWindowVisibility(visibility))
+    }
+
     override fun onWindowVisibilityChanged(visibility: Int) {
         super.onWindowVisibilityChanged(resolveEffectiveWindowVisibility(visibility))
     }
@@ -143,7 +147,7 @@ class WebViewPool(
                 }
             }
         }
-        listOf(150L, 450L, 900L).forEach { delayMs ->
+        listOf(150L, 450L, 1000L, 2200L).forEach { delayMs ->
             mainHandler.postDelayed({
                 pool.values.forEach { wv ->
                     runCatching {

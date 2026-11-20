@@ -65,7 +65,7 @@
     <string name="battery_opt_open_system_list">Optimization List</string>
     <string name="battery_opt_settings_unavailable">Unable to open system battery settings on this device.</string>
     <string name="gemini_ai_title">Gemini Shield AI</string>
-    <string name="gemini_ai_subtitle">Powered by Firebase AI Logic • Gemini 3.8 Flash</string>
+    <string name="gemini_ai_subtitle">Firebase AI Logic • Gemini 3.8 Flash</string>
     <string name="gemini_ai_menu_item">Gemini Shield AI</string>
     <string name="gemini_ai_prompt_hint">Ask Gemini about this page, trackers, or privacy…</string>
     <string name="gemini_ai_send">Ask</string>
