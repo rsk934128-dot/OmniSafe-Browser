@@ -79,7 +79,6 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.example.R
 import com.example.browser.TrackerAndUrlEngine
 import com.example.data.BookmarkEntity
 import com.example.data.HistoryEntity
@@ -266,8 +265,15 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
+@Suppress("DiscouragedApi")
 internal fun resolveDefaultWebClientId(context: Context): String? {
-    return runCatching { context.getString(R.string.default_web_client_id) }
+    val resId = context.resources.getIdentifier(
+        "default_web_client_id",
+        "string",
+        context.packageName,
+    )
+    if (resId == 0) return null
+    return runCatching { context.getString(resId) }
         .getOrNull()
         ?.takeIf { it.isNotBlank() }
 }
