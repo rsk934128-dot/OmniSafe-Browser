@@ -17,8 +17,8 @@ object PrivacyScripts {
             platform = "Linux armv8l",
         ),
         SpoofedUserAgentProfile(
-            label = "Firefox Android Mobile",
-            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:131.0) Gecko/131.0 Firefox/131.0",
+            label = "Chrome Mobile (Standard)",
+            userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
             platform = "Linux armv8l",
         ),
     )

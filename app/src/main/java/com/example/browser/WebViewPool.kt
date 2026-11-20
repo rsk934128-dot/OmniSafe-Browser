@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.MutableContextWrapper
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
@@ -263,6 +264,15 @@ class WebViewPool(
         }
     }
 
+    private fun isGoogleAuthUrl(url: String?): Boolean {
+        val host = TrackerAndUrlEngine.normalizeHost(url) ?: return false
+        return host == "accounts.google.com" ||
+            host.endsWith(".accounts.google.com") ||
+            host == "accounts.youtube.com" ||
+            host == "gsi.google.com" ||
+            host == "myaccount.google.com"
+    }
+
     private fun injectHardeningScript(
         tabId: String,
         webView: WebView?,
@@ -271,13 +281,14 @@ class WebViewPool(
     ) {
         if (webView == null || isJsDisabledForTab(tabId, currentConfig, url)) return
         val siteAllowed = TrackerAndUrlEngine.isSiteWhitelisted(url, currentConfig.adBlockWhitelistHosts)
+        val isGoogleAuth = currentConfig.browserMode == BrowserMode.SURFACE && isGoogleAuthUrl(url)
         val script = PrivacyScripts.buildHardeningScript(
             seed = (webView.tag as? String) ?: seed,
             enableWebRtcGuard = currentConfig.webRtcLeakProtectionEnabled,
-            enableFingerprintRandomization = currentConfig.fingerprintRandomizationEnabled,
+            enableFingerprintRandomization = currentConfig.fingerprintRandomizationEnabled && !isGoogleAuth,
             mode = currentConfig.browserMode,
-            enableCosmeticAdBlock = currentConfig.trackerBlockerEnabled && currentConfig.cosmeticAdBlockEnabled && !siteAllowed,
-            enablePopupGuard = currentConfig.popupBlockerEnabled && !siteAllowed,
+            enableCosmeticAdBlock = currentConfig.trackerBlockerEnabled && currentConfig.cosmeticAdBlockEnabled && !siteAllowed && !isGoogleAuth,
+            enablePopupGuard = currentConfig.popupBlockerEnabled && !siteAllowed && !isGoogleAuth,
             enableBackgroundMediaPlayback = currentConfig.backgroundMediaPlaybackEnabled,
         )
         if (script.isNotEmpty()) {
@@ -335,6 +346,9 @@ class WebViewPool(
             )
             if (softwareLayerTabs.contains(tabId)) {
                 setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
             }
             addJavascriptInterface(
                 object {
@@ -450,8 +464,21 @@ class WebViewPool(
 
                 val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
                 val tempWebView = WebView(wrapperContext).apply {
+                    if (softwareLayerTabs.contains(tabId)) {
+                        setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                    }
                     var handled = false
                     webViewClient = object : WebViewClient() {
+                        override fun onRenderProcessGone(
+                            childView: WebView?,
+                            detail: RenderProcessGoneDetail?,
+                        ): Boolean {
+                            if (detail?.didCrash() == false) {
+                                softwareLayerTabs.add(tabId)
+                            }
+                            runCatching { childView?.destroy() }
+                            return true
+                        }
                         override fun shouldOverrideUrlLoading(
                             childView: WebView?,
                             request: WebResourceRequest?,
@@ -786,13 +813,19 @@ class WebViewPool(
         config: SecurityConfig,
         urlOverride: String? = null,
     ) {
-        val jsEnabled = !isJsDisabledForTab(tabId, config, urlOverride)
+        val effectiveUrl = urlOverride ?: tabCurrentUrls[tabId]
+        val jsEnabled = !isJsDisabledForTab(tabId, config, effectiveUrl)
         val settings = webView.settings
         if (settings.javaScriptEnabled != jsEnabled) {
             settings.javaScriptEnabled = jsEnabled
         }
         if (settings.javaScriptCanOpenWindowsAutomatically != jsEnabled) {
             settings.javaScriptCanOpenWindowsAutomatically = jsEnabled
+        }
+        runCatching {
+            val allowThirdParty = !config.blockThirdPartyCookies ||
+                (config.browserMode == BrowserMode.SURFACE && isGoogleAuthUrl(effectiveUrl))
+            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, allowThirdParty)
         }
     }
 
@@ -857,7 +890,10 @@ class WebViewPool(
         runCatching {
             val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(config.browserMode == BrowserMode.SURFACE)
-            cookieManager.setAcceptThirdPartyCookies(webView, !config.blockThirdPartyCookies)
+            val effectiveUrl = urlOverride ?: tabCurrentUrls[tabId]
+            val allowThirdParty = !config.blockThirdPartyCookies ||
+                (config.browserMode == BrowserMode.SURFACE && isGoogleAuthUrl(effectiveUrl))
+            cookieManager.setAcceptThirdPartyCookies(webView, allowThirdParty)
         }
     }
 }

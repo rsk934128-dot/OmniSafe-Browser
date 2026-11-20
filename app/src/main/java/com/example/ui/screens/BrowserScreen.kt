@@ -224,7 +224,7 @@ fun BrowserScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                        .padding(start = 10.dp, end = 4.dp, top = 0.dp, bottom = 0.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
@@ -248,7 +248,7 @@ fun BrowserScreen(
                                     .testTag("live_service_indicator_chip"),
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                                 ) {
@@ -280,7 +280,7 @@ fun BrowserScreen(
                                 .testTag("top_vpn_chip"),
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
@@ -332,8 +332,7 @@ fun BrowserScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp)
-                        .padding(bottom = 8.dp),
+                        .padding(start = 10.dp, end = 4.dp, bottom = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
@@ -349,7 +348,7 @@ fun BrowserScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
@@ -1340,7 +1339,7 @@ private fun ModePill(
             .testTag(testTag),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(5.dp),
         ) {
@@ -1390,7 +1389,7 @@ private fun ProxyStatusChip(
             .testTag("proxy_status_chip"),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(5.dp),
         ) {

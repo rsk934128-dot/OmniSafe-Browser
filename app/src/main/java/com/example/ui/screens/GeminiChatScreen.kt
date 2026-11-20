@@ -134,6 +134,7 @@ fun GeminiChatScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
+                expandedHeight = 52.dp,
                 title = {
                     Column {
                         Text(
@@ -275,8 +276,8 @@ fun GeminiChatScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(start = 16.dp, top = 6.dp, end = 16.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // Active Page Context & One-Tap Page Summary / Privacy Audit Actions
@@ -306,8 +307,8 @@ fun GeminiChatScreen(
                                 ),
                         )
                         Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
