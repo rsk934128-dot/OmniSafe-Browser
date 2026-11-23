@@ -100,6 +100,7 @@ fun BrowserWebView(
     if (externalWebViewFactory == null) {
         DisposableEffect(tabKey) {
             onDispose {
+                runCatching { CookieManager.getInstance().flush() }
                 managedWebView?.let { wv ->
                     (wv.parent as? ViewGroup)?.removeView(wv)
                     wv.stopLoading()

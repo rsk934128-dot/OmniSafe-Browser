@@ -1324,4 +1324,38 @@ class ExampleRobolectricTest {
         assertEquals(com.example.data.repository.ChatRole.MODEL, vm.messages.value[1].role)
         assertTrue(vm.messages.value[1].text.contains("three encrypted relays"))
     }
+
+    @Test
+    fun `persistent surface seed authenticated hosts and webview session preservation work for google and any site`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = com.example.data.PrivacyPreferencesRepository(context)
+
+        val initialSeed = repo.ensureSurfaceDeviceSeed("SEED1111")
+        assertEquals("SEED1111", initialSeed)
+        // Subsequent app starts reuse the same Surface seed until explicitly rotated
+        assertEquals("SEED1111", repo.ensureSurfaceDeviceSeed("SEED9999"))
+
+        repo.addAuthenticatedSessionHost("www.customshop.example")
+        assertTrue(repo.authenticatedSessionHosts.first().contains("customshop.example"))
+
+        // Auth flow URL detection covers Google, major SSO providers, and arbitrary /login or /oauth endpoints
+        assertTrue(com.example.browser.WebViewPool.isAuthFlowUrl("https://accounts.google.com/v3/signin"))
+        assertTrue(com.example.browser.WebViewPool.isAuthFlowUrl("https://www.example.com/oauth2/authorize"))
+        assertTrue(com.example.browser.WebViewPool.isAuthFlowUrl("https://portal.mybank.org/login"))
+        assertFalse(com.example.browser.WebViewPool.isAuthFlowUrl("https://example.org/news/article-1"))
+
+        // Cross-domain account session hosts work for Google, YouTube, other major sites, and any user-logged-in domain
+        val recordedHosts = repo.authenticatedSessionHosts.first()
+        assertTrue(com.example.browser.WebViewPool.isAccountSessionHost("https://m.youtube.com/watch?v=abc", recordedHosts))
+        assertTrue(com.example.browser.WebViewPool.isAccountSessionHost("https://www.google.com/search?q=ai", recordedHosts))
+        assertTrue(com.example.browser.WebViewPool.isAccountSessionHost("https://github.com/settings", recordedHosts))
+        assertTrue(com.example.browser.WebViewPool.isAccountSessionHost("https://sub.customshop.example/account", recordedHosts))
+        assertFalse(com.example.browser.WebViewPool.isAccountSessionHost("https://untrusted-news.example/home", recordedHosts))
+
+        // Explicit shred rotates seed and clears authenticated hosts
+        repo.rotateSurfaceDeviceSeed("SEED2222")
+        repo.clearAuthenticatedSessionHosts()
+        assertEquals("SEED2222", repo.surfaceDeviceSeed.first())
+        assertTrue(repo.authenticatedSessionHosts.first().isEmpty())
+    }
 }

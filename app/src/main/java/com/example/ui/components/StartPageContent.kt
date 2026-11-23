@@ -390,12 +390,6 @@ fun StartPageContent(
                         ) {
                             rowItems.forEach { app ->
                                 val tileAccent = if (app.isOnion) shieldColors.torAccent else accentColor
-                                val badgeLetters = app.title.trim()
-                                    .split(" ")
-                                    .filter { it.isNotBlank() }
-                                    .take(2)
-                                    .joinToString("") { it.first().uppercaseChar().toString() }
-                                    .ifBlank { "APP" }
                                 Surface(
                                     modifier = Modifier
                                         .weight(1f)
@@ -449,20 +443,15 @@ fun StartPageContent(
                                             horizontalAlignment = Alignment.CenterHorizontally,
                                             verticalArrangement = Arrangement.spacedBy(5.dp),
                                         ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(38.dp)
-                                                    .clip(RoundedCornerShape(10.dp))
-                                                    .background(tileAccent.copy(alpha = 0.16f)),
-                                                contentAlignment = Alignment.Center,
-                                            ) {
-                                                Text(
-                                                    text = badgeLetters,
-                                                    style = MaterialTheme.typography.labelLarge,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = tileAccent,
-                                                )
-                                            }
+                                            WebsiteLogo(
+                                                url = app.url,
+                                                title = app.title,
+                                                accentColor = tileAccent,
+                                                size = 40.dp,
+                                                cornerRadius = 10.dp,
+                                                isOnion = app.isOnion,
+                                                allowNetworkFetch = !isTor && !app.isOnion,
+                                            )
                                             Text(
                                                 text = app.title,
                                                 style = MaterialTheme.typography.labelSmall,
@@ -645,20 +634,15 @@ fun StartPageContent(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(linkColor.copy(alpha = 0.15f)),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Icon(
-                                    imageVector = if (link.isOnion) Icons.Rounded.Security else Icons.Rounded.TravelExplore,
-                                    contentDescription = link.title,
-                                    tint = linkColor,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                            }
+                            WebsiteLogo(
+                                url = link.url,
+                                title = link.title,
+                                accentColor = linkColor,
+                                size = 36.dp,
+                                cornerRadius = 10.dp,
+                                isOnion = link.isOnion,
+                                allowNetworkFetch = !isTor && !link.isOnion,
+                            )
                             Column(modifier = Modifier.weight(1f)) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,

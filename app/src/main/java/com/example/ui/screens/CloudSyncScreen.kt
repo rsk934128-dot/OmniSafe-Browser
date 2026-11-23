@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.util.Log
+import com.example.ui.components.WebsiteLogo
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -855,16 +856,14 @@ private fun CloudSyncAuthenticatedScreen(
                                 Row(
                                     modifier = Modifier.padding(14.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 ) {
-                                    Icon(
-                                        imageVector = when {
-                                            isHomeApp -> Icons.Rounded.Language
-                                            isHistory -> Icons.Rounded.History
-                                            else -> Icons.Rounded.Bookmark
-                                        },
-                                        contentDescription = null,
-                                        tint = shieldColors.surfaceAccent,
+                                    WebsiteLogo(
+                                        url = item.url,
+                                        title = item.title,
+                                        accentColor = shieldColors.surfaceAccent,
+                                        size = 36.dp,
+                                        cornerRadius = 9.dp,
                                     )
                                     Column(
                                         modifier = Modifier.weight(1f),
