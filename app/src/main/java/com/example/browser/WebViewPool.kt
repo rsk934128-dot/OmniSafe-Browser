@@ -43,6 +43,7 @@ import com.example.data.SecurityConfig
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 interface WebViewEventCallbacks {
     fun onPageStarted(tabId: String, url: String)
@@ -315,15 +316,25 @@ class WebViewPool(
 
             fun captureBitmapAfterDomScan(detectedButtons: List<DetectedTradeButton>) {
                 val window = findHostWindow(wv.context)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && window != null && wv.isAttachedToWindow) {
+                val decor = window?.decorView
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                    window != null &&
+                    decor != null &&
+                    decor.width > 0 &&
+                    decor.height > 0 &&
+                    wv.isAttachedToWindow
+                ) {
                     val location = IntArray(2)
                     wv.getLocationInWindow(location)
-                    val srcRect = Rect(
-                        location[0],
-                        location[1],
-                        location[0] + viewW,
-                        location[1] + viewH,
-                    )
+                    val left = location[0].coerceIn(0, decor.width)
+                    val top = location[1].coerceIn(0, decor.height)
+                    val right = (location[0] + viewW).coerceIn(left, decor.width)
+                    val bottom = (location[1] + viewH).coerceIn(top, decor.height)
+                    val srcRect = Rect(left, top, right, bottom)
+                    if (srcRect.width() < 16 || srcRect.height() < 16) {
+                        onResult(renderWebViewCanvasSnapshot(wv, targetW, targetH, scale), detectedButtons)
+                        return
+                    }
                     val destBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
                     val pixelCopyAttempted = runCatching {
                         PixelCopy.request(
@@ -350,13 +361,27 @@ class WebViewPool(
                 }
             }
 
+            val domScanCompleted = AtomicBoolean(false)
+            val domTimeoutRunnable = Runnable {
+                if (domScanCompleted.compareAndSet(false, true)) {
+                    captureBitmapAfterDomScan(emptyList())
+                }
+            }
+            mainHandler.postDelayed(domTimeoutRunnable, 1200L)
+
             runCatching {
                 wv.evaluateJavascript(TradePilotHelper.TRADE_DOM_SCAN_SCRIPT) { rawJson ->
-                    val buttons = TradePilotHelper.parseDetectedButtonsJson(rawJson)
-                    captureBitmapAfterDomScan(buttons)
+                    if (domScanCompleted.compareAndSet(false, true)) {
+                        mainHandler.removeCallbacks(domTimeoutRunnable)
+                        val buttons = TradePilotHelper.parseDetectedButtonsJson(rawJson)
+                        captureBitmapAfterDomScan(buttons)
+                    }
                 }
             }.onFailure {
-                captureBitmapAfterDomScan(emptyList())
+                if (domScanCompleted.compareAndSet(false, true)) {
+                    mainHandler.removeCallbacks(domTimeoutRunnable)
+                    captureBitmapAfterDomScan(emptyList())
+                }
             }
         }
     }

@@ -111,6 +111,7 @@ data class TradePilotUiState(
     val lastTapNormY: Float? = null,
     val totalExecutionsCount: Int = 0,
     val lastError: String? = null,
+    val needsAiKeySetup: Boolean = false,
 )
 
 data class BrowserUiState(
@@ -148,7 +149,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private val localDb = OnionShieldDatabase.getInstance(application)
     private val libraryRepo = BrowserLibraryRepository(localDb)
     private val searchHistoryRepo = EncryptedSearchHistoryRepository(application, localDb.searchHistoryDao())
-    private val geminiShieldRepository = GeminiShieldRepository()
+    private val geminiShieldRepository = GeminiShieldRepository().apply {
+        attachAppContext(application)
+    }
     val webViewPool = WebViewPool(application, this)
     private val autoFallbackAttemptedIds = mutableSetOf<Long>()
     private var tradeAutoPilotJob: Job? = null
@@ -2006,9 +2009,35 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun setAiAssistantEnabled(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setAiAssistantEnabled(enabled)
+        if (!enabled) {
+            tradeAutoPilotJob?.cancel()
+            tradeAutoPilotJob = null
+            _uiState.update { state ->
+                state.copy(
+                    tradePilot = state.tradePilot.copy(
+                        isPanelExpanded = false,
+                        isAutoPilotRunning = false,
+                        isAnalyzing = false,
+                        isCapturingScreen = false,
+                        lastTapNormX = null,
+                        lastTapNormY = null,
+                    ),
+                    statusBannerMessage = "AI turned OFF",
+                )
+            }
+        } else {
+            _uiState.update { it.copy(statusBannerMessage = "AI turned ON") }
+        }
+    }
+
     // AI Screen Trade Pilot
     fun toggleTradePilotPanel() {
         val next = !_uiState.value.tradePilot.isPanelExpanded
+        if (next && !_uiState.value.securityConfig.aiAssistantEnabled) {
+            viewModelScope.launch { prefsRepo.setAiAssistantEnabled(true) }
+        }
         _uiState.update { state ->
             state.copy(
                 tradePilot = state.tradePilot.copy(
@@ -2061,6 +2090,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
             return
+        }
+        if (!_uiState.value.securityConfig.aiAssistantEnabled) {
+            viewModelScope.launch { prefsRepo.setAiAssistantEnabled(true) }
         }
         if (_uiState.value.activeTab.isStartPage) {
             _uiState.update { state ->
@@ -2189,11 +2221,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             )
         }
 
-        var capturedBitmap: android.graphics.Bitmap? = null
+        var firstFrameBitmap: android.graphics.Bitmap? = null
+        var secondFrameBitmap: android.graphics.Bitmap? = null
         try {
-            // Brief frame delay so any floating overlay inside WebView bounds hides before PixelCopy.
+            // Brief delay so any floating overlay inside WebView bounds hides cleanly before PixelCopy.
             delay(60L)
-            val (bitmap, detectedButtons) = suspendCancellableCoroutine { cont ->
+            val (frame1, buttons1) = suspendCancellableCoroutine { cont ->
                 webViewPool.captureScreenAndTradeControls(activeTab.id) { bmp, buttons ->
                     if (cont.isActive) {
                         cont.resume(bmp to buttons)
@@ -2202,12 +2235,31 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
             }
+            firstFrameBitmap = frame1
+
+            // Wait ~850ms and capture a second frame so Vision AI verifies live price direction before BUY/SELL.
+            delay(850L)
+            val (frame2, buttons2) = suspendCancellableCoroutine { cont ->
+                webViewPool.captureScreenAndTradeControls(activeTab.id) { bmp, buttons ->
+                    if (cont.isActive) {
+                        cont.resume(bmp to buttons)
+                    } else {
+                        runCatching { bmp?.recycle() }
+                    }
+                }
+            }
+            secondFrameBitmap = frame2
+
             _uiState.update { state ->
                 state.copy(tradePilot = state.tradePilot.copy(isCapturingScreen = false))
             }
-            capturedBitmap = bitmap
+
+            val currentFrame = frame2 ?: frame1
+            val priorFrame = if (frame2 != null && frame1 != null && frame2 !== frame1) frame1 else null
+            val detectedButtons = if (buttons2.isNotEmpty()) buttons2 else buttons1
             lastDetectedTradeButtons = detectedButtons
-            if (bitmap == null) {
+
+            if (currentFrame == null) {
                 _uiState.update { state ->
                     state.copy(
                         tradePilot = state.tradePilot.copy(
@@ -2222,9 +2274,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             val controlsSummary = TradePilotHelper.formatControlsSummary(detectedButtons)
             val decision = withContext(Dispatchers.IO) {
                 geminiShieldRepository.analyzeScreenForTradeSignal(
-                    screenshot = bitmap,
+                    screenshot = currentFrame,
                     pageUrl = activeTab.url,
                     domControlsSummary = controlsSummary,
+                    previousScreenshot = priorFrame,
                 )
             }
 
@@ -2273,6 +2326,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                         lastTapNormY = if (clicked && resolvedTarget != null) resolvedTarget.normY else null,
                         totalExecutionsCount = if (clicked) state.tradePilot.totalExecutionsCount + 1 else state.tradePilot.totalExecutionsCount,
                         lastError = clickFailureReason,
+                        needsAiKeySetup = false,
                     ),
                     statusBannerMessage = banner ?: state.statusBannerMessage,
                 )
@@ -2280,17 +2334,23 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            val friendlyMsg = if (GeminiShieldRepository.isTransientHighDemandError(e)) {
-                "Gemini Vision is briefly busy right now. Tap Analyze again."
-            } else {
-                e.localizedMessage?.takeIf { it.isNotBlank() } ?: "Screen analysis failed."
+            val needsSetup = GeminiShieldRepository.isAppCheckOrAttestationError(e)
+            val friendlyMsg = when {
+                needsSetup ->
+                    "Installed APK needs a Personal Gemini Key (App Check HTTP 403). Tap \"AI Key\" above."
+                GeminiShieldRepository.isTransientHighDemandError(e) ->
+                    "Gemini Vision is briefly busy right now. Tap Analyze again."
+                else ->
+                    e.localizedMessage?.takeIf { it.isNotBlank() } ?: "Screen analysis failed."
             }
             _uiState.update { state ->
                 state.copy(
                     tradePilot = state.tradePilot.copy(
                         isAnalyzing = false,
                         isCapturingScreen = false,
+                        isAutoPilotRunning = if (needsSetup) false else state.tradePilot.isAutoPilotRunning,
                         lastError = friendlyMsg,
+                        needsAiKeySetup = needsSetup,
                     ),
                 )
             }
@@ -2298,7 +2358,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             _uiState.update { state ->
                 state.copy(tradePilot = state.tradePilot.copy(isCapturingScreen = false))
             }
-            runCatching { capturedBitmap?.recycle() }
+            runCatching { firstFrameBitmap?.recycle() }
+            if (secondFrameBitmap !== firstFrameBitmap) {
+                runCatching { secondFrameBitmap?.recycle() }
+            }
         }
     }
 

@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Summarize
@@ -58,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
@@ -70,8 +72,10 @@ import com.example.data.BrowserMode
 import com.example.data.BrowserTab
 import com.example.data.SecurityConfig
 import com.example.data.repository.PageAiContext
+import com.example.security.UserGeminiKeyStore
 import com.example.ui.GeminiAssistantViewModel
 import com.example.ui.GeminiUiState
+import com.example.ui.components.AiConnectionSetupDialog
 import com.example.ui.components.ChatMessageRow
 import com.example.ui.components.ModelMessageCard
 import com.example.ui.theme.LocalShieldColors
@@ -85,16 +89,24 @@ fun GeminiChatScreen(
     onNavigateBack: () -> Unit,
     assistantViewModel: GeminiAssistantViewModel = viewModel(),
 ) {
+    val context = LocalContext.current
     val shieldColors = LocalShieldColors.current
     val uiState by assistantViewModel.uiState.collectAsStateWithLifecycle()
     val messages by assistantViewModel.messages.collectAsStateWithLifecycle()
+    val hasPersonalKey by UserGeminiKeyStore.hasPersonalKeyFlow.collectAsStateWithLifecycle()
+    val preferPersonalKey by UserGeminiKeyStore.preferPersonalKeyFlow.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
 
     var promptInput by remember { mutableStateOf("") }
     var pageSnippet by remember(activeTab.id, activeTab.url) { mutableStateOf("") }
     var attachPageContext by remember(activeTab.id, activeTab.url) { mutableStateOf(!activeTab.isStartPage) }
+    var showAiSetupDialog by remember { mutableStateOf(false) }
 
     val isBusy = uiState is GeminiUiState.Loading || uiState is GeminiUiState.Streaming
+
+    LaunchedEffect(Unit) {
+        assistantViewModel.attachAppContext(context.applicationContext)
+    }
 
     LaunchedEffect(activeTab.id, activeTab.url) {
         if (!activeTab.isStartPage) {
@@ -143,9 +155,13 @@ fun GeminiChatScreen(
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = stringResource(R.string.gemini_ai_subtitle),
+                            text = if (hasPersonalKey && preferPersonalKey) {
+                                "Personal Gemini Key • Encrypted"
+                            } else {
+                                stringResource(R.string.gemini_ai_subtitle)
+                            },
                             style = MaterialTheme.typography.labelSmall,
-                            color = shieldColors.surfaceAccent,
+                            color = if (hasPersonalKey && preferPersonalKey) shieldColors.secureGreen else shieldColors.surfaceAccent,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -163,6 +179,16 @@ fun GeminiChatScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { showAiSetupDialog = true },
+                        modifier = Modifier.testTag("gemini_ai_setup_button"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Key,
+                            contentDescription = stringResource(R.string.cd_open_ai_setup),
+                            tint = if (hasPersonalKey) shieldColors.secureGreen else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
                     if (messages.isNotEmpty()) {
                         IconButton(
                             onClick = { assistantViewModel.clearChat() },
@@ -547,6 +573,21 @@ fun GeminiChatScreen(
                                     ) {
                                         Text("Dismiss")
                                     }
+                                    if (state.requiresAiSetup) {
+                                        Spacer(Modifier.width(8.dp))
+                                        OutlinedButton(
+                                            onClick = { showAiSetupDialog = true },
+                                            modifier = Modifier.testTag("gemini_fix_ai_setup_button"),
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Key,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("Connect AI Key")
+                                        }
+                                    }
                                     if (state.canRetry) {
                                         Spacer(Modifier.width(8.dp))
                                         Button(
@@ -565,5 +606,14 @@ fun GeminiChatScreen(
                 GeminiUiState.Idle, is GeminiUiState.Success -> Unit
             }
         }
+    }
+
+    if (showAiSetupDialog) {
+        AiConnectionSetupDialog(
+            onDismiss = { showAiSetupDialog = false },
+            onSavedOrUpdated = {
+                assistantViewModel.attachAppContext(context.applicationContext)
+            },
+        )
     }
 }

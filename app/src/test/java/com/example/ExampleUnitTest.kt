@@ -8,6 +8,7 @@ import com.example.browser.TradePilotHelper
 import com.example.browser.TradeSignalDecision
 import com.example.browser.WebsiteLogoCache
 import com.example.data.DownloadEntity
+import com.example.data.repository.GeminiPersonalRestClient
 import com.example.data.repository.GeminiShieldRepository
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -242,9 +243,51 @@ class ExampleUnitTest {
         val prompt = GeminiShieldRepository.buildTradeAnalysisPrompt(
             pageUrl = "https://m.expertoption.com",
             domControlsSummary = TradePilotHelper.formatControlsSummary(emptyList()),
+            hasTwoFrames = true,
         )
         assertTrue(prompt.contains("https://m.expertoption.com"))
         assertTrue(prompt.contains("BUY or SELL"))
+        assertTrue(prompt.contains("FRAME A"))
+        assertTrue(prompt.contains("FRAME B"))
+        assertTrue(GeminiShieldRepository.TRADE_ANALYST_SYSTEM_INSTRUCTION.contains("Never default to HOLD"))
         assertNotNull(GeminiShieldRepository.TRADE_VISION_SCHEMA)
+    }
+
+    @Test
+    fun geminiRepository_detectsAppCheckErrorsDistinctFromTransientLoadErrors() {
+        assertTrue(GeminiShieldRepository.isAppCheckOrAttestationError(RuntimeException("HTTP 403 App Check token is invalid")))
+        assertTrue(GeminiShieldRepository.isAppCheckOrAttestationError(RuntimeException("PERMISSION_DENIED: missing attestation")))
+        assertTrue(GeminiShieldRepository.isAppCheckOrAttestationError(IllegalStateException("Play Integrity check failed")))
+        assertFalse(GeminiShieldRepository.isAppCheckOrAttestationError(RuntimeException("Socket timeout after 15000ms")))
+        assertFalse(GeminiShieldRepository.isAppCheckOrAttestationError(RuntimeException("HTTP 503 Service Unavailable: high demand")))
+        assertFalse(GeminiShieldRepository.isTransientHighDemandError(RuntimeException("HTTP 403 App Check token is invalid")))
+        assertTrue(GeminiShieldRepository.isTransientHighDemandError(RuntimeException("HTTP 503 Service Unavailable")))
+    }
+
+    @Test
+    fun geminiPersonalRestClient_picksBestActiveFlashModelAndStripsJsonFences() {
+        val sampleModelsJson = """
+            {
+              "models": [
+                {"name": "models/text-embedding-004", "supportedGenerationMethods": ["embedContent"]},
+                {"name": "models/gemini-3.5-flash-lite", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-flash-latest", "supportedGenerationMethods": ["generateContent"]}
+              ]
+            }
+        """.trimIndent()
+        val picked = GeminiPersonalRestClient.pickBestFlashModelName(sampleModelsJson)
+        assertEquals("gemini-3.8-flash", picked)
+        assertNull(GeminiPersonalRestClient.pickBestFlashModelName(""))
+
+        val fenced = """
+            ```json
+            {"decision": "SELL", "confidence": 82}
+            ```
+        """.trimIndent()
+        assertEquals(
+            """{"decision": "SELL", "confidence": 82}""",
+            GeminiPersonalRestClient.stripJsonCodeFences(fenced),
+        )
     }
 }

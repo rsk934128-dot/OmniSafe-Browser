@@ -64,6 +64,7 @@ class PrivacyPreferencesRepository(private val context: Context) {
         val LAST_MEDIA_DURATION_MS = longPreferencesKey("last_media_duration_ms")
         val SURFACE_DEVICE_SEED = stringPreferencesKey("surface_device_seed")
         val AUTHENTICATED_SESSION_HOSTS = stringSetPreferencesKey("authenticated_session_hosts")
+        val AI_ASSISTANT_ENABLED = booleanPreferencesKey("ai_assistant_enabled")
     }
 
     val securityConfig: Flow<SecurityConfig> = context.privacyDataStore.data.map { prefs ->
@@ -110,6 +111,7 @@ class PrivacyPreferencesRepository(private val context: Context) {
             backgroundLiveServiceEnabled = prefs[Keys.BACKGROUND_LIVE_SERVICE] ?: false,
             backgroundMediaPlaybackEnabled = prefs[Keys.BACKGROUND_MEDIA_PLAYBACK] ?: true,
             biometricAppLockEnabled = prefs[Keys.BIOMETRIC_APP_LOCK] ?: true,
+            aiAssistantEnabled = prefs[Keys.AI_ASSISTANT_ENABLED] ?: true,
             vpnProfile = prefs[Keys.VPN_PROFILE]?.let {
                 runCatching { VpnServerProfile.valueOf(it) }.getOrNull()
             } ?: VpnServerProfile.CLOUDFLARE_WARP,
@@ -360,6 +362,10 @@ class PrivacyPreferencesRepository(private val context: Context) {
 
     suspend fun setBiometricAppLockEnabled(enabled: Boolean) {
         context.privacyDataStore.edit { it[Keys.BIOMETRIC_APP_LOCK] = enabled }
+    }
+
+    suspend fun setAiAssistantEnabled(enabled: Boolean) {
+        context.privacyDataStore.edit { it[Keys.AI_ASSISTANT_ENABLED] = enabled }
     }
 
     suspend fun setVpnProfile(profile: VpnServerProfile) {

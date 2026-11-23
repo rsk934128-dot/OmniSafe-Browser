@@ -79,6 +79,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -98,6 +100,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -121,6 +125,7 @@ import com.example.data.TorProxyState
 import com.example.data.VpnTunnelStatus
 import com.example.ui.BrowserUiState
 import com.example.ui.BrowserViewModel
+import com.example.ui.components.AiConnectionSetupDialog
 import com.example.ui.components.BrowserWebView
 import com.example.ui.components.CircuitDiagnosticSheet
 import com.example.ui.components.DisclaimerDialog
@@ -194,6 +199,7 @@ fun BrowserScreen(
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showCustomLinkInstallDialog by remember { mutableStateOf(false) }
     var showQrScanner by remember { mutableStateOf(false) }
+    var showAiSetupDialog by remember { mutableStateOf(false) }
 
     val activeTab = uiState.activeTab
     val isTorMode = uiState.securityConfig.browserMode == BrowserMode.TOR_ONION
@@ -643,6 +649,43 @@ fun BrowserScreen(
                                         },
                                     )
                                 }
+                                val aiEnabled = uiState.securityConfig.aiAssistantEnabled
+                                val aiMenuTint = if (aiEnabled) shieldColors.secureGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                                val switchContentDesc = stringResource(R.string.cd_top_ai_switch)
+                                HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = if (aiEnabled) {
+                                                "${stringResource(R.string.ai_menu_master_label)} (ON)"
+                                            } else {
+                                                "${stringResource(R.string.ai_menu_master_label)} (OFF)"
+                                            },
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (aiEnabled) shieldColors.secureGreen else MaterialTheme.colorScheme.onSurface,
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Rounded.AutoAwesome,
+                                            contentDescription = null,
+                                            tint = aiMenuTint,
+                                        )
+                                    },
+                                    trailingIcon = {
+                                        Switch(
+                                            checked = aiEnabled,
+                                            onCheckedChange = null,
+                                            colors = SwitchDefaults.colors(
+                                                checkedThumbColor = Color.Black,
+                                                checkedTrackColor = shieldColors.secureGreen,
+                                            ),
+                                            modifier = Modifier.semantics { contentDescription = switchContentDesc },
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("menu_ai_master_switch"),
+                                    onClick = { viewModel.setAiAssistantEnabled(!aiEnabled) },
+                                )
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.gemini_ai_menu_item)) },
                                     leadingIcon = {
@@ -655,6 +698,9 @@ fun BrowserScreen(
                                     modifier = Modifier.testTag("menu_gemini_assistant"),
                                     onClick = {
                                         showOverflowMenu = false
+                                        if (!aiEnabled) {
+                                            viewModel.setAiAssistantEnabled(true)
+                                        }
                                         onOpenGeminiAssistant()
                                     },
                                 )
@@ -675,6 +721,21 @@ fun BrowserScreen(
                                         },
                                     )
                                 }
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.ai_setup_title)) },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Rounded.VpnKey,
+                                            contentDescription = null,
+                                            tint = accentColor,
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("menu_ai_setup"),
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        showAiSetupDialog = true
+                                    },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Scan QR Code URL") },
                                     leadingIcon = { Icon(Icons.Rounded.QrCodeScanner, contentDescription = null) },
@@ -793,7 +854,11 @@ fun BrowserScreen(
             }
         },
         floatingActionButton = {
-            if (activeTab.isStartPage && fullscreenCustomView == null && !uiState.isOmniboxFocused) {
+            if (uiState.securityConfig.aiAssistantEnabled &&
+                activeTab.isStartPage &&
+                fullscreenCustomView == null &&
+                !uiState.isOmniboxFocused
+            ) {
                 FloatingActionButton(
                     onClick = onOpenGeminiAssistant,
                     containerColor = MaterialTheme.colorScheme.primary,
@@ -1000,7 +1065,8 @@ fun BrowserScreen(
 
                     // Expandable AI Screen Trade Pilot HUD docked cleanly ABOVE WebView so chart & PixelCopy stay 100% unobstructed
                     AnimatedVisibility(
-                        visible = uiState.tradePilot.isPanelExpanded &&
+                        visible = uiState.securityConfig.aiAssistantEnabled &&
+                            uiState.tradePilot.isPanelExpanded &&
                             fullscreenCustomView == null &&
                             !uiState.isOmniboxFocused,
                     ) {
@@ -1018,6 +1084,7 @@ fun BrowserScreen(
                                 onExecuteLastDecision = viewModel::executeLastTradeDecision,
                                 onToggleAutoPilot = viewModel::toggleTradeAutoPilot,
                                 onSelectMinConfidence = viewModel::setTradeMinConfidence,
+                                onOpenAiSetup = { showAiSetupDialog = true },
                                 onDismiss = viewModel::closeTradePilotPanel,
                             )
                         }
@@ -1065,8 +1132,9 @@ fun BrowserScreen(
                             )
                         }
 
-                        // Compact Top-Right AI Controls (hidden while expanded or during capture)
-                        if (fullscreenCustomView == null &&
+                        // Compact Top-Right AI Controls (hidden when AI switched OFF, expanded, or capturing)
+                        if (uiState.securityConfig.aiAssistantEnabled &&
+                            fullscreenCustomView == null &&
                             !uiState.isOmniboxFocused &&
                             !uiState.tradePilot.isPanelExpanded &&
                             !uiState.tradePilot.isCapturingScreen
@@ -1453,6 +1521,15 @@ fun BrowserScreen(
                 viewModel.showStatusBanner("Opened QR link: $scannedInput")
             },
             onDismiss = { showQrScanner = false },
+        )
+    }
+
+    if (showAiSetupDialog) {
+        AiConnectionSetupDialog(
+            onDismiss = { showAiSetupDialog = false },
+            onSavedOrUpdated = {
+                viewModel.showStatusBanner("AI connection configuration updated.")
+            },
         )
     }
 }

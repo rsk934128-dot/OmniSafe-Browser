@@ -85,4 +85,14 @@
     <string name="trade_pilot_disclaimer">AI chart analysis is advisory only; verify REAL vs DEMO mode before trading.</string>
     <string name="cd_open_trade_pilot">Toggle AI Screen Trade Pilot</string>
     <string name="cd_close_trade_pilot">Minimize AI Screen Trade Pilot</string>
+    <string name="ai_setup_title">AI Connection Setup</string>
+    <string name="ai_setup_explanation">Inside AI Studio Preview, Firebase App Check authenticates automatically. When you install the APK on your phone, App Check blocks sideloaded builds unless a personal Gemini API key or registered Debug Token is set.</string>
+    <string name="cd_open_ai_setup">Open AI key and connection setup</string>
+    <string name="cd_close_ai_setup">Close AI connection setup</string>
+    <string name="ai_switch_on">AI ON</string>
+    <string name="ai_switch_off">AI OFF</string>
+    <string name="ai_switch_chat_chip">Chat</string>
+    <string name="ai_switch_trade_chip">Trade</string>
+    <string name="ai_menu_master_label">AI Features</string>
+    <string name="cd_top_ai_switch">Toggle AI features on or off</string>
 </resources>

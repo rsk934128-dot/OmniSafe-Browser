@@ -1,8 +1,10 @@
 package com.example.data.repository
 
+import android.content.Context
 import android.graphics.Bitmap
 import com.example.browser.TradeDecision
 import com.example.browser.TradeSignalDecision
+import com.example.security.UserGeminiKeyStore
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Content
@@ -53,6 +55,24 @@ data class PagePrivacyAudit(
 )
 
 open class GeminiShieldRepository {
+
+    @Volatile
+    private var appContext: Context? = null
+
+    private val personalRestClient by lazy { GeminiPersonalRestClient() }
+
+    fun attachAppContext(context: Context) {
+        val app = context.applicationContext
+        appContext = app
+        UserGeminiKeyStore.syncFromPrefs(app)
+    }
+
+    private fun resolvePersonalKeyConfig(): Pair<String, Boolean>? {
+        val ctx = appContext ?: return null
+        val key = UserGeminiKeyStore.getApiKey(ctx) ?: return null
+        val prefer = UserGeminiKeyStore.isPersonalKeyPreferred(ctx)
+        return key to prefer
+    }
 
     private val chatModel by lazy {
         createChatModel(MODEL_NAME)
@@ -107,15 +127,7 @@ open class GeminiShieldRepository {
                 responseSchema = TRADE_VISION_SCHEMA
             },
             systemInstruction = content {
-                text(
-                    "You are a decisive short-term technical price-action and UI vision analyst. " +
-                        "Inspect the live chart screenshot carefully: evaluate the latest price leg leading " +
-                        "to the active price dot/candle, recent swing bounce or rejection, higher-low vs " +
-                        "lower-high structure, and slope momentum. Choose BUY when recent momentum or bounce " +
-                        "favors upside, or SELL when momentum or rejection favors downside, with a realistic " +
-                        "directional confidence (50-95) and exact button coordinates. Return HOLD ONLY when " +
-                        "no trading chart or Buy/Sell buttons are visible or price is completely flat.",
-                )
+                text(TRADE_ANALYST_SYSTEM_INSTRUCTION)
             },
         )
 
@@ -124,6 +136,18 @@ open class GeminiShieldRepository {
         userPrompt: String,
         pageContext: PageAiContext?,
     ): Flow<String> = flow {
+        val personalCfg = resolvePersonalKeyConfig()
+        if (personalCfg != null && personalCfg.second) {
+            val reply = personalRestClient.generateChatReply(
+                apiKey = personalCfg.first,
+                history = history,
+                userPrompt = userPrompt,
+                pageContext = pageContext,
+            )
+            emit(reply)
+            return@flow
+        }
+
         val sdkHistory = buildSdkHistory(history)
         val fullPrompt = buildContextualPrompt(userPrompt, pageContext)
 
@@ -176,6 +200,16 @@ open class GeminiShieldRepository {
                 throw e
             } catch (e: Exception) {
                 if (emittedAny) return@flow
+                if (personalCfg != null && isAppCheckOrAttestationError(e)) {
+                    val reply = personalRestClient.generateChatReply(
+                        apiKey = personalCfg.first,
+                        history = history,
+                        userPrompt = userPrompt,
+                        pageContext = pageContext,
+                    )
+                    emit(reply)
+                    return@flow
+                }
                 if (!isTransientHighDemandError(e) || attemptIdx == plan.lastIndex) {
                     throw e
                 }
@@ -190,6 +224,14 @@ open class GeminiShieldRepository {
         sendChatMessageStream(history = emptyList(), userPrompt = prompt, pageContext = pageContext)
 
     open suspend fun runStructuredPrivacyAudit(pageContext: PageAiContext): PagePrivacyAudit {
+        val personalCfg = resolvePersonalKeyConfig()
+        if (personalCfg != null && personalCfg.second) {
+            return personalRestClient.runStructuredPrivacyAudit(
+                apiKey = personalCfg.first,
+                pageContext = pageContext,
+            )
+        }
+
         val prompt = buildString {
             appendLine("Analyze this web page context for user privacy, phishing/scam signals, and security posture:")
             appendLine("URL: ${pageContext.url}")
@@ -229,6 +271,12 @@ open class GeminiShieldRepository {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                if (personalCfg != null && isAppCheckOrAttestationError(e)) {
+                    return personalRestClient.runStructuredPrivacyAudit(
+                        apiKey = personalCfg.first,
+                        pageContext = pageContext,
+                    )
+                }
                 if (!isTransientHighDemandError(e) || attemptIdx == plan.lastIndex) {
                     throw e
                 }
@@ -243,15 +291,36 @@ open class GeminiShieldRepository {
         screenshot: Bitmap,
         pageUrl: String,
         domControlsSummary: String,
+        previousScreenshot: Bitmap? = null,
     ): TradeSignalDecision {
-        val promptText = buildTradeAnalysisPrompt(pageUrl = pageUrl, domControlsSummary = domControlsSummary)
+        val personalCfg = resolvePersonalKeyConfig()
+        if (personalCfg != null && personalCfg.second) {
+            return personalRestClient.analyzeScreenForTradeSignal(
+                apiKey = personalCfg.first,
+                screenshot = screenshot,
+                pageUrl = pageUrl,
+                domControlsSummary = domControlsSummary,
+                previousScreenshot = previousScreenshot,
+            )
+        }
+
+        val promptText = buildTradeAnalysisPrompt(
+            pageUrl = pageUrl,
+            domControlsSummary = domControlsSummary,
+            hasTwoFrames = previousScreenshot != null,
+        )
         val multimodalInput = content {
+            if (previousScreenshot != null) {
+                text("FRAME A (~0.9s earlier):")
+                image(previousScreenshot)
+                text("FRAME B (CURRENT LIVE SCREEN RIGHT NOW):")
+            }
             image(screenshot)
             text(promptText)
         }
         val plan = listOf(
-            tradeVisionModel to 20_000L,
-            fallbackTradeVisionModel to 25_000L,
+            tradeVisionModel to 28_000L,
+            fallbackTradeVisionModel to 32_000L,
         )
         var lastError: Exception? = null
 
@@ -276,6 +345,15 @@ open class GeminiShieldRepository {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                if (personalCfg != null && isAppCheckOrAttestationError(e)) {
+                    return personalRestClient.analyzeScreenForTradeSignal(
+                        apiKey = personalCfg.first,
+                        screenshot = screenshot,
+                        pageUrl = pageUrl,
+                        domControlsSummary = domControlsSummary,
+                        previousScreenshot = previousScreenshot,
+                    )
+                }
                 if (!isTransientHighDemandError(e) || attemptIdx == plan.lastIndex) {
                     throw e
                 }
@@ -293,8 +371,41 @@ open class GeminiShieldRepository {
         private const val FALLBACK_ATTEMPT_TIMEOUT_MS = 18_000L
         private const val FALLBACK_DELAY_MS = 300L
 
+        const val TRADE_ANALYST_SYSTEM_INSTRUCTION =
+            "You are an expert short-term binary options and price-action trading analyst inspecting live chart screenshots. " +
+                "Your job is to check the chart carefully and execute a decisive BUY or SELL call whenever a live chart and trading buttons are present. " +
+                "Analyze: (1) Frame-to-frame direction of the active price dot/candle (rising vs falling), " +
+                "(2) Recent swing structure (higher lows & upward bounce from support -> BUY; lower highs & downward rejection from resistance -> SELL), " +
+                "(3) Range/oscillation extremes (bouncing off bottom support -> BUY; stalling at top resistance -> SELL), " +
+                "(4) Exact normalized coordinates of the BUY/CALL or SELL/PUT button. " +
+                "CRITICAL RULE: Never default to HOLD because a chart is volatile, fast, or ranging. " +
+                "Whenever a live chart and BUY/SELL buttons are visible, you MUST commit to BUY or SELL with a realistic confidence between 60 and 94. " +
+                "Return HOLD ONLY if no chart or Buy/Sell buttons appear on screen."
+
+        fun isAppCheckOrAttestationError(error: Throwable): Boolean {
+            val combinedMsg = generateSequence(error) { it.cause }
+                .flatMap { err ->
+                    sequenceOf(
+                        err::class.java.simpleName.lowercase(),
+                        err.message?.lowercase().orEmpty(),
+                    )
+                }
+                .joinToString(" ")
+            return combinedMsg.contains("app check") ||
+                combinedMsg.contains("appcheck") ||
+                combinedMsg.contains("attestation") ||
+                combinedMsg.contains("403") ||
+                combinedMsg.contains("permission_denied") ||
+                combinedMsg.contains("permission denied") ||
+                combinedMsg.contains("unauthenticated") ||
+                combinedMsg.contains("recaptcha") ||
+                combinedMsg.contains("play integrity") ||
+                combinedMsg.contains("token is invalid")
+        }
+
         fun isTransientHighDemandError(error: Throwable): Boolean {
             if (error is TimeoutCancellationException) return true
+            if (isAppCheckOrAttestationError(error)) return false
             val className = error::class.java.simpleName.lowercase()
             if (className.contains("serviceunavailable") || className.contains("quotaexceeded")) {
                 return true
@@ -302,11 +413,7 @@ open class GeminiShieldRepository {
             val combinedMsg = generateSequence(error) { it.cause }
                 .mapNotNull { it.message?.lowercase() }
                 .joinToString(" ")
-            if (combinedMsg.contains("403") ||
-                combinedMsg.contains("app check") ||
-                combinedMsg.contains("api key") ||
-                combinedMsg.contains("permission denied")
-            ) {
+            if (combinedMsg.contains("api key")) {
                 return false
             }
             return combinedMsg.contains("high demand") ||
@@ -427,7 +534,7 @@ open class GeminiShieldRepository {
         }
 
         fun parsePagePrivacyAuditJson(rawJson: String): PagePrivacyAudit {
-            val json = JSONObject(rawJson)
+            val json = JSONObject(GeminiPersonalRestClient.stripJsonCodeFences(rawJson))
             val risk = json.optString("riskLevel", "Medium").ifBlank { "Medium" }
             val summary = json.getString("summary")
             val signalsJson = json.optJSONArray("privacySignals")
@@ -446,18 +553,35 @@ open class GeminiShieldRepository {
             )
         }
 
-        fun buildTradeAnalysisPrompt(pageUrl: String, domControlsSummary: String): String = buildString {
-            appendLine("Examine this live trading webpage screenshot carefully and decide BUY, SELL, or HOLD.")
+        fun buildTradeAnalysisPrompt(
+            pageUrl: String,
+            domControlsSummary: String,
+            hasTwoFrames: Boolean = false,
+        ): String = buildString {
+            appendLine(
+                if (hasTwoFrames) {
+                    "You are given TWO sequential live frames (FRAME A ~0.9s earlier, FRAME B current live screen). Compare them closely and decide BUY or SELL."
+                } else {
+                    "Examine this live trading chart screenshot closely and decide BUY or SELL."
+                },
+            )
             if (pageUrl.isNotBlank()) {
                 appendLine("Page URL: $pageUrl")
             }
             appendLine()
-            appendLine("Short-term chart inspection steps:")
-            appendLine("1. Identify the asset/pair and visible account mode (REAL or DEMO at the top bar) plus the active price line/candles.")
-            appendLine("2. Focus on the latest price swing leading right into the live price marker/dot: upward breakout, support V-bounce, or rising slope favors BUY; downward drop, resistance rejection, or falling slope favors SELL.")
-            appendLine("3. Short-term 5s-60s charts naturally oscillate — do NOT choose HOLD just because volatility exists. Give your best BUY or SELL call with an honest confidence score (50-95) whenever a chart and BUY/SELL buttons are present.")
-            appendLine("4. Output HOLD only if the chart/Buy-Sell buttons are not visible on screen or the price line is completely flat/frozen.")
-            appendLine("5. Return exact normalized (0.0 to 1.0) coordinates of the chosen BUY or SELL button center.")
+            appendLine("Trained Short-Term Execution Checklist:")
+            appendLine("1. Read top bar asset ticker (e.g. EUR / USD) and REAL vs DEMO badge.")
+            if (hasTwoFrames) {
+                appendLine("2. Compare FRAME A vs FRAME B: did the glowing price dot/last candle tick higher (upside impulse / bounce) or lower (downside impulse / rejection)?")
+            } else {
+                appendLine("2. Inspect the final 3-8 ticks/candles leading directly into the glowing price marker.")
+            }
+            appendLine("3. Apply clear directional rules:")
+            appendLine("   - Pick BUY when: price makes higher lows, breaks above a recent micro-peak, rebounds strongly off a recent floor/double-bottom, or ticks steadily upward into Frame B.")
+            appendLine("   - Pick SELL when: price makes lower highs, breaks below a recent micro-trough, rejects downward from a recent ceiling/double-top, or ticks steadily downward into Frame B.")
+            appendLine("   - In choppy/sideways oscillation: trade the active swing edge (BUY near lower half / support hook-up; SELL near upper half / resistance turn-down). Do NOT output HOLD 0% for active volatility!")
+            appendLine("4. Output calibrated confidence 60-94 for BUY or SELL whenever chart + Buy/Sell buttons are visible. Use HOLD only if no trading chart or Buy/Sell buttons exist on screen.")
+            appendLine("5. Return exact normalized center (0.0 to 1.0) of the chosen BUY (usually green/right) or SELL (usually red/left) button.")
             if (domControlsSummary.isNotBlank()) {
                 appendLine()
                 appendLine("Detected DOM control hints (viewport-relative):")

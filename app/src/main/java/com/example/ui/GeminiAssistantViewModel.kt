@@ -1,5 +1,6 @@
 package com.example.ui
 
+import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -27,6 +28,7 @@ sealed interface GeminiUiState {
     data class Error(
         val message: String,
         val canRetry: Boolean = false,
+        val requiresAiSetup: Boolean = false,
     ) : GeminiUiState
 }
 
@@ -56,6 +58,10 @@ class GeminiAssistantViewModel(
     val lastPrompt: StateFlow<String> = _lastPrompt.asStateFlow()
 
     private var pendingFailedRequest: PendingGeminiRequest? = null
+
+    fun attachAppContext(context: Context) {
+        repository.attachAppContext(context)
+    }
 
     fun sendMessage(
         prompt: String,
@@ -130,9 +136,11 @@ class GeminiAssistantViewModel(
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Gemini chat streaming inference failed", e)
+                val needsSetup = GeminiShieldRepository.isAppCheckOrAttestationError(e)
                 _uiState.value = GeminiUiState.Error(
                     message = formatUserFacingError(e, "Failed to reach Gemini via Firebase AI Logic."),
                     canRetry = true,
+                    requiresAiSetup = needsSetup,
                 )
             }
         }
@@ -196,9 +204,11 @@ class GeminiAssistantViewModel(
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Structured page audit failed", e)
+                val needsSetup = GeminiShieldRepository.isAppCheckOrAttestationError(e)
                 _uiState.value = GeminiUiState.Error(
                     message = formatUserFacingError(e, "Unable to analyze this page with Gemini."),
                     canRetry = true,
+                    requiresAiSetup = needsSetup,
                 )
             }
         }
@@ -238,10 +248,12 @@ class GeminiAssistantViewModel(
 
     private fun formatUserFacingError(error: Exception, fallback: String): String {
         val raw = error.localizedMessage?.trim().orEmpty().ifBlank { fallback }
-        return if (GeminiShieldRepository.isTransientHighDemandError(error)) {
-            "Gemini servers are briefly busy right now. Tap Retry to try again."
-        } else {
-            raw
+        return when {
+            GeminiShieldRepository.isAppCheckOrAttestationError(error) ->
+                "Firebase App Check rejected this installed APK (HTTP 403). Tap \"Connect AI Key\" above to add a free personal Gemini API key or apply a Debug Token."
+            GeminiShieldRepository.isTransientHighDemandError(error) ->
+                "Gemini servers are briefly busy right now. Tap Retry to try again."
+            else -> raw
         }
     }
 

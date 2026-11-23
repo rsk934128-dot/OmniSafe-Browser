@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.AutoGraph
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material.icons.rounded.TouchApp
@@ -44,6 +45,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
@@ -57,8 +59,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.browser.TradeDecision
+import com.example.security.UserGeminiKeyStore
 import com.example.ui.TradePilotUiState
 import com.example.ui.theme.LocalShieldColors
 import kotlin.math.roundToInt
@@ -155,10 +159,12 @@ fun TradePilotHudCard(
     onExecuteLastDecision: () -> Unit,
     onToggleAutoPilot: (Boolean) -> Unit,
     onSelectMinConfidence: (Int) -> Unit,
+    onOpenAiSetup: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val shieldColors = LocalShieldColors.current
+    val hasPersonalKey = UserGeminiKeyStore.hasPersonalKeyFlow.collectAsStateWithLifecycle().value
     val decision = tradePilot.lastDecision
     val decisionColor = when (decision?.decision) {
         TradeDecision.BUY -> shieldColors.secureGreen
@@ -224,18 +230,42 @@ fun TradePilotHudCard(
                     }
                 }
 
-                IconButton(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .size(34.dp)
-                        .testTag("trade_pilot_close_button"),
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = stringResource(R.string.cd_close_trade_pilot),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp),
-                    )
+                    IconButton(
+                        onClick = onOpenAiSetup,
+                        modifier = Modifier
+                            .size(34.dp)
+                            .testTag("trade_pilot_ai_key_button"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Key,
+                            contentDescription = stringResource(R.string.cd_open_ai_setup),
+                            tint = if (hasPersonalKey) {
+                                shieldColors.secureGreen
+                            } else if (tradePilot.needsAiKeySetup) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            modifier = Modifier.size(17.dp),
+                        )
+                    }
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .size(34.dp)
+                            .testTag("trade_pilot_close_button"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = stringResource(R.string.cd_close_trade_pilot),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                 }
             }
 
@@ -246,6 +276,17 @@ fun TradePilotHudCard(
                         .height(2.5.dp)
                         .clip(CircleShape),
                     color = accentColor,
+                )
+                Text(
+                    text = if (tradePilot.isCapturingScreen) {
+                        "Checking live chart movement (2 frames)…"
+                    } else {
+                        "Analyzing momentum & Buy/Sell setup…"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = accentColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
 
@@ -303,14 +344,36 @@ fun TradePilotHudCard(
                     color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.85f),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(
-                        text = tradePilot.lastError,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = tradePilot.lastError,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (tradePilot.needsAiKeySetup) {
+                            TextButton(
+                                onClick = onOpenAiSetup,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.testTag("trade_pilot_fix_key_button"),
+                            ) {
+                                Text(
+                                    text = "AI Key",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                            }
+                        }
+                    }
                 }
             }
 

@@ -241,6 +241,7 @@ data class SecurityConfig(
     val backgroundLiveServiceEnabled: Boolean = false,
     val backgroundMediaPlaybackEnabled: Boolean = true,
     val biometricAppLockEnabled: Boolean = true,
+    val aiAssistantEnabled: Boolean = true,
     val vpnProfile: VpnServerProfile = VpnServerProfile.CLOUDFLARE_WARP,
 ) {
     val torEndpoint: String

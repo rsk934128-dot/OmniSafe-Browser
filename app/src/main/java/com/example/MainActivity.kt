@@ -335,6 +335,9 @@ class MainActivity : FragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent.hasExtra("FIREBASE_APPCHECK_DEBUG_TOKEN")) {
+            configureAppCheck(this, intent)
+        }
         val extracted = extractExternalIntent(intent)
         if (extracted != null) {
             pendingExternalIntent.value = extracted
