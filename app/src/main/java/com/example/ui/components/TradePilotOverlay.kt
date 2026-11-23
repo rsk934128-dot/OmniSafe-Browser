@@ -17,18 +17,27 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ShowChart
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.AutoGraph
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material.icons.rounded.Visibility
@@ -36,6 +45,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -48,6 +58,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -62,6 +76,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.browser.TradeDecision
+import com.example.browser.TradeOutcome
 import com.example.security.UserGeminiKeyStore
 import com.example.ui.TradePilotUiState
 import com.example.ui.theme.LocalShieldColors
@@ -159,12 +174,21 @@ fun TradePilotHudCard(
     onExecuteLastDecision: () -> Unit,
     onToggleAutoPilot: (Boolean) -> Unit,
     onSelectMinConfidence: (Int) -> Unit,
+    onReportTradeOutcome: (TradeOutcome) -> Unit,
+    onToggleSelfAdapt: (Boolean) -> Unit,
+    onResetTradeLearning: () -> Unit,
+    onExportCsv: () -> Unit,
     onOpenAiSetup: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val shieldColors = LocalShieldColors.current
     val hasPersonalKey = UserGeminiKeyStore.hasPersonalKeyFlow.collectAsStateWithLifecycle().value
+    var showLearningDrawer by remember { mutableStateOf(false) }
+    val learning = tradePilot.learningProfile
+    var showChartDrawer by remember(learning.recentTrades.isNotEmpty()) {
+        mutableStateOf(learning.recentTrades.isNotEmpty())
+    }
     val decision = tradePilot.lastDecision
     val decisionColor = when (decision?.decision) {
         TradeDecision.BUY -> shieldColors.secureGreen
@@ -189,6 +213,8 @@ fun TradePilotHudCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(max = 390.dp)
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 10.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
@@ -267,6 +293,135 @@ fun TradePilotHudCard(
                         )
                     }
                 }
+            }
+
+            // Win/Loss Scoreboard & Self-Learning Stage Strip
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = shieldColors.secureGreen.copy(alpha = 0.14f),
+                    ) {
+                        Text(
+                            text = "W:${learning.totalWins}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = shieldColors.secureGreen,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.14f),
+                    ) {
+                        Text(
+                            text = "L:${learning.totalLosses}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                        )
+                    }
+                    if (learning.totalDecided > 0) {
+                        Text(
+                            text = "${learning.winRatePercent}% WR",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                    Text(
+                        text = "• ${learning.maturityStageLabel}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = accentColor.copy(alpha = if (showChartDrawer) 0.22f else 0.10f),
+                        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.35f)),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { showChartDrawer = !showChartDrawer }
+                            .testTag("trade_pilot_chart_toggle"),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.ShowChart,
+                                contentDescription = null,
+                                tint = accentColor,
+                                modifier = Modifier.size(13.dp),
+                            )
+                            Text(
+                                text = stringResource(R.string.trade_pilot_chart_toggle),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = accentColor,
+                            )
+                        }
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = accentColor.copy(alpha = if (showLearningDrawer) 0.22f else 0.10f),
+                        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.35f)),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { showLearningDrawer = !showLearningDrawer }
+                            .testTag("trade_pilot_memory_toggle"),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Psychology,
+                                contentDescription = null,
+                                tint = accentColor,
+                                modifier = Modifier.size(13.dp),
+                            )
+                            Text(
+                                text = stringResource(R.string.trade_pilot_memory_label),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = accentColor,
+                            )
+                            Icon(
+                                imageVector = if (showLearningDrawer) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                contentDescription = null,
+                                tint = accentColor,
+                                modifier = Modifier.size(13.dp),
+                            )
+                        }
+                    }
+                }
+            }
+
+            AnimatedVisibility(visible = showChartDrawer) {
+                TradePerformanceChart(
+                    learningProfile = learning,
+                    accentColor = accentColor,
+                )
             }
 
             if (tradePilot.isAnalyzing) {
@@ -457,6 +612,205 @@ fun TradePilotHudCard(
                 }
             }
 
+            // Quick Outcome Verification & 1-Tap Won / Lost Calibration Row
+            val showOutcomeRow = tradePilot.pendingVerification != null ||
+                (decision != null && tradePilot.lastClickedAction != null && decision.decision != TradeDecision.HOLD)
+            if (showOutcomeRow) {
+                val pending = tradePilot.pendingVerification
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = when {
+                            tradePilot.isVerifyingOutcome -> "Checking ${pending?.assetName ?: "trade"} result…"
+                            pending != null -> "Active ${pending.decision.name} (${pending.expirySeconds}s auto-check)"
+                            else -> "Last tap: ${tradePilot.lastClickedAction}"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedButton(
+                            onClick = { onReportTradeOutcome(TradeOutcome.WIN) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                            border = BorderStroke(1.dp, shieldColors.secureGreen.copy(alpha = 0.65f)),
+                            modifier = Modifier
+                                .height(36.dp)
+                                .testTag("trade_pilot_mark_win"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Check,
+                                contentDescription = null,
+                                tint = shieldColors.secureGreen,
+                                modifier = Modifier.size(14.dp),
+                            )
+                            Spacer(Modifier.size(3.dp))
+                            Text(
+                                text = stringResource(R.string.trade_pilot_won_button),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = shieldColors.secureGreen,
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = { onReportTradeOutcome(TradeOutcome.LOSS) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.65f)),
+                            modifier = Modifier
+                                .height(36.dp)
+                                .testTag("trade_pilot_mark_loss"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(14.dp),
+                            )
+                            Spacer(Modifier.size(3.dp))
+                            Text(
+                                text = stringResource(R.string.trade_pilot_lost_button),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (learning.learnedLessons.isNotEmpty() && !showLearningDrawer) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = accentColor.copy(alpha = 0.08f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = "AI Lesson: ${learning.learnedLessons.first()}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                    )
+                }
+            }
+
+            AnimatedVisibility(visible = showLearningDrawer) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    border = BorderStroke(1.dp, accentColor.copy(alpha = 0.25f)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = "BUY ${learning.buyWins}W/${learning.buyLosses}L • SELL ${learning.sellWins}W/${learning.sellLosses}L • Streak ${learning.bestWinStreak}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(
+                                onClick = onResetTradeLearning,
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                modifier = Modifier
+                                    .height(24.dp)
+                                    .testTag("trade_pilot_reset_memory"),
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.trade_pilot_reset_memory),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = "${stringResource(R.string.trade_pilot_auto_adapt_label)} (${tradePilot.minConfidencePercent}% / ${tradePilot.cooldownSeconds}s)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Switch(
+                                checked = learning.selfAdaptEnabled,
+                                onCheckedChange = onToggleSelfAdapt,
+                                colors = SwitchDefaults.colors(checkedTrackColor = shieldColors.secureGreen),
+                                modifier = Modifier.testTag("trade_pilot_self_adapt_switch"),
+                            )
+                        }
+
+                        if (learning.learnedLessons.isNotEmpty()) {
+                            HorizontalDivider()
+                            learning.learnedLessons.take(3).forEachIndexed { idx, lesson ->
+                                Text(
+                                    text = "${idx + 1}. $lesson",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.88f),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+
+                        if (learning.recentTrades.isNotEmpty()) {
+                            HorizontalDivider()
+                            learning.recentTrades.take(3).forEach { rec ->
+                                val tagColor = when (rec.outcome) {
+                                    TradeOutcome.WIN -> shieldColors.secureGreen
+                                    TradeOutcome.LOSS -> MaterialTheme.colorScheme.error
+                                    TradeOutcome.DRAW -> shieldColors.warningAmber
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = "${rec.decision.name} ${rec.confidence}% • ${rec.assetName}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Text(
+                                        text = rec.outcome.name,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = tagColor,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -467,7 +821,7 @@ fun TradePilotHudCard(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Text(
-                        text = "Conf:",
+                        text = if (learning.selfAdaptEnabled) "Conf(${tradePilot.minConfidencePercent}%):" else "Conf:",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -535,6 +889,48 @@ fun TradePilotHudCard(
                             modifier = Modifier.testTag("trade_pilot_auto_switch"),
                         )
                     }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = if (learning.recentTrades.isNotEmpty()) {
+                        "Logged Trades: ${learning.recentTrades.size}"
+                    } else {
+                        "Export past trades & P/L"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedButton(
+                    onClick = onExportCsv,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                    border = BorderStroke(1.dp, accentColor.copy(alpha = 0.55f)),
+                    modifier = Modifier
+                        .height(36.dp)
+                        .testTag("trade_pilot_download_csv_button"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Download,
+                        contentDescription = null,
+                        tint = accentColor,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.size(4.dp))
+                    Text(
+                        text = stringResource(R.string.trade_pilot_download_csv),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = accentColor,
+                        maxLines = 1,
+                    )
                 }
             }
         }

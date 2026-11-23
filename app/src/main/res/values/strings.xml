@@ -95,4 +95,13 @@
     <string name="ai_switch_trade_chip">Trade</string>
     <string name="ai_menu_master_label">AI Features</string>
     <string name="cd_top_ai_switch">Toggle AI features on or off</string>
+    <string name="trade_pilot_memory_label">AI Memory</string>
+    <string name="trade_pilot_won_button">Won</string>
+    <string name="trade_pilot_lost_button">Lost</string>
+    <string name="trade_pilot_auto_adapt_label">Auto-Adapt Conf/Speed</string>
+    <string name="trade_pilot_reset_memory">Reset</string>
+    <string name="trade_pilot_chart_toggle">P/L Chart</string>
+    <string name="trade_pilot_chart_title">Profit / Loss Curve</string>
+    <string name="trade_pilot_chart_empty">No settled trades yet — scan or tap Won/Lost to plot curve</string>
+    <string name="trade_pilot_download_csv">Download CSV</string>
 </resources>

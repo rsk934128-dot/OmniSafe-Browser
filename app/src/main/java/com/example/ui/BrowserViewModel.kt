@@ -24,6 +24,7 @@ import com.example.browser.HomeAppShortcutHelper
 import com.example.browser.LiveMonitorForegroundService
 import com.example.browser.LiveSessionRuntime
 import com.example.browser.OnionShieldVpnService
+import com.example.browser.PendingTradeSnapshot
 import com.example.browser.PrivacyScripts
 import com.example.browser.ResolvedClickTarget
 import com.example.browser.SessionGuardEngine
@@ -34,6 +35,11 @@ import com.example.browser.TorCircuitService
 import com.example.browser.TorProxyController
 import com.example.browser.TrackerAndUrlEngine
 import com.example.browser.TradeDecision
+import com.example.browser.TradeDomSnapshot
+import com.example.browser.TradeLearningEngine
+import com.example.browser.TradeLearningProfile
+import com.example.browser.TradeOutcome
+import com.example.browser.TradeOutcomeVerification
 import com.example.browser.TradePilotHelper
 import com.example.browser.TradeSignalDecision
 import com.example.browser.VpnTunnelRuntime
@@ -112,6 +118,9 @@ data class TradePilotUiState(
     val totalExecutionsCount: Int = 0,
     val lastError: String? = null,
     val needsAiKeySetup: Boolean = false,
+    val learningProfile: TradeLearningProfile = TradeLearningProfile(),
+    val pendingVerification: PendingTradeSnapshot? = null,
+    val isVerifyingOutcome: Boolean = false,
 )
 
 data class BrowserUiState(
@@ -155,6 +164,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     val webViewPool = WebViewPool(application, this)
     private val autoFallbackAttemptedIds = mutableSetOf<Long>()
     private var tradeAutoPilotJob: Job? = null
+    private var pendingOutcomeJob: Job? = null
     private var lastDetectedTradeButtons: List<DetectedTradeButton> = emptyList()
 
     private val _uiState = MutableStateFlow(BrowserUiState())
@@ -280,6 +290,28 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             prefsRepo.authenticatedSessionHosts.collectLatest { hosts ->
                 webViewPool.updateAuthenticatedHosts(hosts)
+            }
+        }
+
+        viewModelScope.launch {
+            prefsRepo.tradeLearningProfile.collectLatest { profile ->
+                _uiState.update { state ->
+                    state.copy(
+                        tradePilot = state.tradePilot.copy(
+                            learningProfile = profile,
+                            minConfidencePercent = if (profile.selfAdaptEnabled) {
+                                profile.adaptedMinConfidence
+                            } else {
+                                state.tradePilot.minConfidencePercent
+                            },
+                            cooldownSeconds = if (profile.selfAdaptEnabled) {
+                                profile.adaptedCooldownSec
+                            } else {
+                                state.tradePilot.cooldownSeconds
+                            },
+                        ),
+                    )
+                }
             }
         }
 
@@ -788,6 +820,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun confirmShredSession() {
+        tradeAutoPilotJob?.cancel()
+        tradeAutoPilotJob = null
+        pendingOutcomeJob?.cancel()
+        pendingOutcomeJob = null
         dismissPopupWebView()
         webViewPool.shredAllSessions()
         LiveSessionRuntime.clearMediaSession()
@@ -2014,6 +2050,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         if (!enabled) {
             tradeAutoPilotJob?.cancel()
             tradeAutoPilotJob = null
+            pendingOutcomeJob?.cancel()
+            pendingOutcomeJob = null
             _uiState.update { state ->
                 state.copy(
                     tradePilot = state.tradePilot.copy(
@@ -2021,6 +2059,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                         isAutoPilotRunning = false,
                         isAnalyzing = false,
                         isCapturingScreen = false,
+                        pendingVerification = null,
+                        isVerifyingOutcome = false,
                         lastTapNormX = null,
                         lastTapNormY = null,
                     ),
@@ -2056,15 +2096,160 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun setTradeMinConfidence(percent: Int) {
         val clamped = percent.coerceIn(50, 95)
+        val currentProfile = _uiState.value.tradePilot.learningProfile
+        val updatedProfile = currentProfile.copy(adaptedMinConfidence = clamped)
         _uiState.update { state ->
-            state.copy(tradePilot = state.tradePilot.copy(minConfidencePercent = clamped))
+            state.copy(
+                tradePilot = state.tradePilot.copy(
+                    minConfidencePercent = clamped,
+                    learningProfile = updatedProfile,
+                ),
+            )
+        }
+        viewModelScope.launch {
+            prefsRepo.saveTradeLearningProfile(updatedProfile)
         }
     }
 
     fun setTradeCooldownSeconds(seconds: Int) {
         val clamped = seconds.coerceIn(5, 60)
+        val currentProfile = _uiState.value.tradePilot.learningProfile
+        val updatedProfile = currentProfile.copy(adaptedCooldownSec = clamped)
         _uiState.update { state ->
-            state.copy(tradePilot = state.tradePilot.copy(cooldownSeconds = clamped))
+            state.copy(
+                tradePilot = state.tradePilot.copy(
+                    cooldownSeconds = clamped,
+                    learningProfile = updatedProfile,
+                ),
+            )
+        }
+        viewModelScope.launch {
+            prefsRepo.saveTradeLearningProfile(updatedProfile)
+        }
+    }
+
+    fun toggleTradeSelfAdapt(enabled: Boolean) {
+        val updated = _uiState.value.tradePilot.learningProfile.copy(selfAdaptEnabled = enabled)
+        _uiState.update { state ->
+            state.copy(
+                tradePilot = state.tradePilot.copy(learningProfile = updated),
+                statusBannerMessage = if (enabled) {
+                    "AI Self-Learning Adaptation ON"
+                } else {
+                    "AI Self-Learning Adaptation OFF (Tracking still active)"
+                },
+            )
+        }
+        viewModelScope.launch {
+            prefsRepo.saveTradeLearningProfile(updated)
+        }
+    }
+
+    fun resetTradeLearning() {
+        pendingOutcomeJob?.cancel()
+        pendingOutcomeJob = null
+        val fresh = TradeLearningProfile()
+        _uiState.update { state ->
+            state.copy(
+                tradePilot = state.tradePilot.copy(
+                    learningProfile = fresh,
+                    minConfidencePercent = fresh.adaptedMinConfidence,
+                    cooldownSeconds = fresh.adaptedCooldownSec,
+                    pendingVerification = null,
+                    isVerifyingOutcome = false,
+                ),
+                statusBannerMessage = "AI Trade Win/Loss Memory reset.",
+            )
+        }
+        viewModelScope.launch {
+            prefsRepo.resetTradeLearningProfile()
+        }
+    }
+
+    fun exportTradeHistoryCsv() {
+        val profile = _uiState.value.tradePilot.learningProfile
+        if (profile.recentTrades.isEmpty()) {
+            _uiState.update { state ->
+                state.copy(
+                    tradePilot = state.tradePilot.copy(
+                        lastError = "No past trades recorded yet to export.",
+                    ),
+                    statusBannerMessage = "No past trades recorded yet to export.",
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            val csvContent = TradeLearningEngine.exportTradesToCsv(profile)
+            val fileName = TradeLearningEngine.buildCsvExportFileName()
+            val app = getApplication<Application>()
+            val saved = withContext(Dispatchers.IO) {
+                csvContent.toByteArray(Charsets.UTF_8).inputStream().use { stream ->
+                    DownloadFileHelper.saveStreamToDownloads(
+                        context = app,
+                        fileName = fileName,
+                        mimeType = "text/csv",
+                        inputStream = stream,
+                    )
+                }
+            }
+            if (saved.success) {
+                libraryRepo.recordDownload(
+                    DownloadEntity(
+                        fileName = saved.savedFileName,
+                        url = saved.localUri.ifBlank { "trade-export://$fileName" },
+                        mimeType = "text/csv",
+                        status = "COMPLETED",
+                        systemDownloadId = -1L,
+                        isOnionSource = false,
+                        sizeBytes = saved.sizeBytes,
+                    ),
+                )
+                _uiState.update { state ->
+                    state.copy(
+                        tradePilot = state.tradePilot.copy(lastError = null),
+                        statusBannerMessage = "Exported ${profile.recentTrades.size} trades to Downloads: ${saved.savedFileName}",
+                    )
+                }
+            } else {
+                _uiState.update { state ->
+                    state.copy(
+                        tradePilot = state.tradePilot.copy(
+                            lastError = saved.errorMessage ?: "Unable to export trade CSV.",
+                        ),
+                        statusBannerMessage = "CSV export failed: ${saved.errorMessage ?: "Storage error"}",
+                    )
+                }
+            }
+        }
+    }
+
+    fun reportManualTradeOutcome(outcome: TradeOutcome) {
+        val pilot = _uiState.value.tradePilot
+        val targetPending = pilot.pendingVerification ?: pilot.lastDecision?.takeIf {
+            it.decision != TradeDecision.HOLD
+        }?.let { dec ->
+            PendingTradeSnapshot(
+                id = "${System.currentTimeMillis()}_${dec.decision.name}",
+                tabId = _uiState.value.activeTabId,
+                assetName = dec.assetName,
+                accountMode = dec.accountMode,
+                decision = dec.decision,
+                confidence = dec.confidence,
+                marketBias = dec.marketBias,
+                reasoning = dec.reasoning,
+            )
+        } ?: return
+
+        pendingOutcomeJob?.cancel()
+        pendingOutcomeJob = null
+        viewModelScope.launch {
+            applyTradeOutcome(
+                pending = targetPending,
+                outcome = outcome,
+                profitDelta = null,
+                aiReflectionLesson = null,
+            )
         }
     }
 
@@ -2171,9 +2356,19 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         viewModelScope.launch {
+            val preSnapshot = probeTradeDomSnapshotSuspend(activeTab.id)
             val clicked = dispatchTradeClick(activeTab.id, target.normX, target.normY)
+            val pending = if (clicked) {
+                createPendingTradeSnapshot(
+                    tabId = activeTab.id,
+                    decision = decision,
+                    preSnapshot = preSnapshot,
+                )
+            } else {
+                null
+            }
             _uiState.update { state ->
-                if (clicked) {
+                if (clicked && pending != null) {
                     state.copy(
                         tradePilot = state.tradePilot.copy(
                             lastClickedAction = decision.decision.name,
@@ -2181,6 +2376,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                             lastTapNormX = target.normX,
                             lastTapNormY = target.normY,
                             totalExecutionsCount = state.tradePilot.totalExecutionsCount + 1,
+                            pendingVerification = pending,
+                            isVerifyingOutcome = false,
                             lastError = null,
                         ),
                         statusBannerMessage = "Tapped ${decision.decision.name} (${decision.confidence}% confidence)",
@@ -2192,6 +2389,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                         ),
                     )
                 }
+            }
+            if (pending != null) {
+                scheduleOutcomeVerification(pending)
             }
         }
     }
@@ -2227,7 +2427,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             // Brief delay so any floating overlay inside WebView bounds hides cleanly before PixelCopy.
             delay(60L)
             val (frame1, buttons1) = suspendCancellableCoroutine { cont ->
-                webViewPool.captureScreenAndTradeControls(activeTab.id) { bmp, buttons ->
+                webViewPool.captureScreenAndTradeControls(activeTab.id, maxDimensionPx = 640) { bmp, buttons ->
                     if (cont.isActive) {
                         cont.resume(bmp to buttons)
                     } else {
@@ -2237,10 +2437,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             }
             firstFrameBitmap = frame1
 
-            // Wait ~850ms and capture a second frame so Vision AI verifies live price direction before BUY/SELL.
-            delay(850L)
+            // Wait ~650ms and capture a second frame so Vision AI verifies live price direction before BUY/SELL.
+            delay(650L)
             val (frame2, buttons2) = suspendCancellableCoroutine { cont ->
-                webViewPool.captureScreenAndTradeControls(activeTab.id) { bmp, buttons ->
+                webViewPool.captureScreenAndTradeControls(activeTab.id, maxDimensionPx = 768) { bmp, buttons ->
                     if (cont.isActive) {
                         cont.resume(bmp to buttons)
                     } else {
@@ -2272,12 +2472,16 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             }
 
             val controlsSummary = TradePilotHelper.formatControlsSummary(detectedButtons)
+            val learningMemoryContext = TradeLearningEngine.buildPromptMemoryContext(
+                _uiState.value.tradePilot.learningProfile,
+            )
             val decision = withContext(Dispatchers.IO) {
                 geminiShieldRepository.analyzeScreenForTradeSignal(
                     screenshot = currentFrame,
                     pageUrl = activeTab.url,
                     domControlsSummary = controlsSummary,
                     previousScreenshot = priorFrame,
+                    learningContext = learningMemoryContext,
                 )
             }
 
@@ -2292,11 +2496,19 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             val shouldClickNow = executeClick && TradePilotHelper.shouldAutoExecuteClick(decision, minConfidence)
             var clicked = false
             var clickFailureReason: String? = null
+            var newPending: PendingTradeSnapshot? = null
 
             if (shouldClickNow) {
                 if (resolvedTarget != null) {
+                    val preSnapshot = probeTradeDomSnapshotSuspend(activeTab.id)
                     clicked = dispatchTradeClick(activeTab.id, resolvedTarget.normX, resolvedTarget.normY)
-                    if (!clicked) {
+                    if (clicked) {
+                        newPending = createPendingTradeSnapshot(
+                            tabId = activeTab.id,
+                            decision = decision,
+                            preSnapshot = preSnapshot,
+                        )
+                    } else {
                         clickFailureReason = "Could not dispatch click on ${decision.decision.name} button."
                     }
                 } else {
@@ -2325,21 +2537,33 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                         lastTapNormX = if (clicked && resolvedTarget != null) resolvedTarget.normX else null,
                         lastTapNormY = if (clicked && resolvedTarget != null) resolvedTarget.normY else null,
                         totalExecutionsCount = if (clicked) state.tradePilot.totalExecutionsCount + 1 else state.tradePilot.totalExecutionsCount,
+                        pendingVerification = newPending ?: state.tradePilot.pendingVerification,
+                        isVerifyingOutcome = if (newPending != null) false else state.tradePilot.isVerifyingOutcome,
                         lastError = clickFailureReason,
                         needsAiKeySetup = false,
                     ),
                     statusBannerMessage = banner ?: state.statusBannerMessage,
                 )
             }
+
+            if (newPending != null) {
+                scheduleOutcomeVerification(newPending)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            android.util.Log.w("TradePilot", "Screen analysis failed: ${e::class.java.simpleName}: ${e.message}")
             val needsSetup = GeminiShieldRepository.isAppCheckOrAttestationError(e)
+            val isTimeout = e is kotlinx.coroutines.TimeoutCancellationException ||
+                (e.message?.contains("timeout", ignoreCase = true) == true) ||
+                (e.message?.contains("timed out", ignoreCase = true) == true)
             val friendlyMsg = when {
                 needsSetup ->
-                    "Installed APK needs a Personal Gemini Key (App Check HTTP 403). Tap \"AI Key\" above."
+                    "Installed APK needs a Personal Gemini Key (App Check HTTP 403). Tap the Key icon above."
+                isTimeout ->
+                    "Gemini Vision timed out over current network. Tap Scan & Click again."
                 GeminiShieldRepository.isTransientHighDemandError(e) ->
-                    "Gemini Vision is briefly busy right now. Tap Analyze again."
+                    "Gemini Vision is temporarily overloaded. Tap Scan & Click again."
                 else ->
                     e.localizedMessage?.takeIf { it.isNotBlank() } ?: "Screen analysis failed."
             }
@@ -2364,6 +2588,167 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             }
         }
     }
+
+    private fun createPendingTradeSnapshot(
+        tabId: String,
+        decision: TradeSignalDecision,
+        preSnapshot: TradeDomSnapshot,
+    ): PendingTradeSnapshot {
+        val now = System.currentTimeMillis()
+        val expirySec = (preSnapshot.expirySeconds ?: 18).coerceIn(6, 75)
+        return PendingTradeSnapshot(
+            id = "${now}_${decision.decision.name}",
+            tabId = tabId,
+            assetName = decision.assetName,
+            accountMode = decision.accountMode,
+            decision = decision.decision,
+            confidence = decision.confidence,
+            marketBias = decision.marketBias,
+            reasoning = decision.reasoning,
+            preClickBalance = preSnapshot.balance,
+            expirySeconds = expirySec,
+            clickedAtMs = now,
+            checkAtMs = now + (expirySec + 4) * 1000L,
+        )
+    }
+
+    private fun scheduleOutcomeVerification(pending: PendingTradeSnapshot) {
+        pendingOutcomeJob?.cancel()
+        pendingOutcomeJob = viewModelScope.launch {
+            try {
+                val initialDelayMs = ((pending.expirySeconds + 4).coerceIn(8, 80)) * 1000L
+                delay(initialDelayMs)
+                if (!isActive || _uiState.value.tradePilot.pendingVerification?.id != pending.id) return@launch
+
+                _uiState.update { state ->
+                    state.copy(tradePilot = state.tradePilot.copy(isVerifyingOutcome = true))
+                }
+
+                for (attempt in 0..1) {
+                    if (!isActive || _uiState.value.tradePilot.pendingVerification?.id != pending.id) break
+                    val domSnap = probeTradeDomSnapshotSuspend(pending.tabId)
+                    val domResult = TradeLearningEngine.evaluateOutcomeFromDom(
+                        preClickBalance = pending.preClickBalance,
+                        snapshot = domSnap,
+                    )
+
+                    var visionVerif: TradeOutcomeVerification? = null
+                    val shouldRunVision = domResult == null || domResult.first == TradeOutcome.LOSS
+                    if (shouldRunVision && _uiState.value.activeTabId == pending.tabId) {
+                        var bmp: android.graphics.Bitmap? = null
+                        try {
+                            bmp = captureTradeBitmapSuspend(pending.tabId)
+                            if (bmp != null) {
+                                visionVerif = withContext(Dispatchers.IO) {
+                                    geminiShieldRepository.verifyTradeOutcomeWithVision(bmp, pending)
+                                }
+                            }
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (e: Exception) {
+                            android.util.Log.w("TradeLearning", "Outcome Vision verify error: ${e.message}")
+                        } finally {
+                            runCatching { bmp?.recycle() }
+                        }
+                    }
+
+                    val resolvedOutcome = domResult?.first ?: visionVerif?.outcome
+                    val resolvedDelta = domResult?.second ?: visionVerif?.profitDelta
+                    val aiLesson = visionVerif?.lessonLearned?.takeIf { it.isNotBlank() }
+
+                    if (resolvedOutcome != null) {
+                        applyTradeOutcome(
+                            pending = pending,
+                            outcome = resolvedOutcome,
+                            profitDelta = resolvedDelta,
+                            aiReflectionLesson = aiLesson,
+                        )
+                        return@launch
+                    }
+                    if (attempt == 0) {
+                        delay(6_000L)
+                    }
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } finally {
+                _uiState.update { state ->
+                    if (state.tradePilot.pendingVerification?.id == pending.id) {
+                        state.copy(tradePilot = state.tradePilot.copy(isVerifyingOutcome = false))
+                    } else {
+                        state
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun applyTradeOutcome(
+        pending: PendingTradeSnapshot,
+        outcome: TradeOutcome,
+        profitDelta: Double?,
+        aiReflectionLesson: String?,
+    ) {
+        val currentProfile = _uiState.value.tradePilot.learningProfile
+        if (currentProfile.recentTrades.any { it.id == pending.id }) return
+
+        val updated = TradeLearningEngine.recordOutcome(
+            profile = currentProfile,
+            assetName = pending.assetName,
+            accountMode = pending.accountMode,
+            decision = pending.decision,
+            confidence = pending.confidence,
+            marketBias = pending.marketBias,
+            reasoning = pending.reasoning,
+            outcome = outcome,
+            profitDelta = profitDelta,
+            aiReflectionLesson = aiReflectionLesson,
+            recordId = pending.id,
+        )
+        prefsRepo.saveTradeLearningProfile(updated)
+        _uiState.update { state ->
+            val clearPending = state.tradePilot.pendingVerification?.id == pending.id ||
+                state.tradePilot.pendingVerification == null
+            state.copy(
+                tradePilot = state.tradePilot.copy(
+                    learningProfile = updated,
+                    pendingVerification = if (clearPending) null else state.tradePilot.pendingVerification,
+                    isVerifyingOutcome = false,
+                    minConfidencePercent = if (updated.selfAdaptEnabled) {
+                        updated.adaptedMinConfidence
+                    } else {
+                        state.tradePilot.minConfidencePercent
+                    },
+                    cooldownSeconds = if (updated.selfAdaptEnabled) {
+                        updated.adaptedCooldownSec
+                    } else {
+                        state.tradePilot.cooldownSeconds
+                    },
+                ),
+                statusBannerMessage = updated.lastOutcomeMessage ?: state.statusBannerMessage,
+            )
+        }
+    }
+
+    private suspend fun probeTradeDomSnapshotSuspend(tabId: String): TradeDomSnapshot =
+        suspendCancellableCoroutine { cont ->
+            webViewPool.probeTradeOutcomeDomSnapshot(tabId) { snap ->
+                if (cont.isActive) {
+                    cont.resume(snap)
+                }
+            }
+        }
+
+    private suspend fun captureTradeBitmapSuspend(tabId: String): android.graphics.Bitmap? =
+        suspendCancellableCoroutine { cont ->
+            webViewPool.captureScreenAndTradeControls(tabId, maxDimensionPx = 640) { bmp, _ ->
+                if (cont.isActive) {
+                    cont.resume(bmp)
+                } else {
+                    runCatching { bmp?.recycle() }
+                }
+            }
+        }
 
     private suspend fun dispatchTradeClick(tabId: String, normX: Float, normY: Float): Boolean =
         suspendCancellableCoroutine { cont ->
@@ -2552,6 +2937,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     override fun onCleared() {
         tradeAutoPilotJob?.cancel()
+        pendingOutcomeJob?.cancel()
         unlockedVaultKey = null
         sessionMonitorSyncService?.stop()
         dismissPopupWebView()

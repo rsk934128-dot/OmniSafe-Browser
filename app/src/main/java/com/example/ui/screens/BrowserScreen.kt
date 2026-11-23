@@ -1084,6 +1084,10 @@ fun BrowserScreen(
                                 onExecuteLastDecision = viewModel::executeLastTradeDecision,
                                 onToggleAutoPilot = viewModel::toggleTradeAutoPilot,
                                 onSelectMinConfidence = viewModel::setTradeMinConfidence,
+                                onReportTradeOutcome = viewModel::reportManualTradeOutcome,
+                                onToggleSelfAdapt = viewModel::toggleTradeSelfAdapt,
+                                onResetTradeLearning = viewModel::resetTradeLearning,
+                                onExportCsv = viewModel::exportTradeHistoryCsv,
                                 onOpenAiSetup = { showAiSetupDialog = true },
                                 onDismiss = viewModel::closeTradePilotPanel,
                             )

@@ -2,7 +2,12 @@ package com.example.data.repository
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
+import com.example.browser.PendingTradeSnapshot
 import com.example.browser.TradeDecision
+import com.example.browser.TradeLearningEngine
+import com.example.browser.TradeOutcome
+import com.example.browser.TradeOutcomeVerification
 import com.example.browser.TradeSignalDecision
 import com.example.security.UserGeminiKeyStore
 import com.google.firebase.Firebase
@@ -98,6 +103,14 @@ open class GeminiShieldRepository {
         createTradeVisionModel(FALLBACK_MODEL_NAME)
     }
 
+    private val tradeOutcomeVisionModel by lazy {
+        createTradeOutcomeVisionModel(MODEL_NAME)
+    }
+
+    private val fallbackTradeOutcomeVisionModel by lazy {
+        createTradeOutcomeVisionModel(FALLBACK_MODEL_NAME)
+    }
+
     private fun createChatModel(modelName: String) =
         Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
             modelName = modelName,
@@ -128,6 +141,15 @@ open class GeminiShieldRepository {
             },
             systemInstruction = content {
                 text(TRADE_ANALYST_SYSTEM_INSTRUCTION)
+            },
+        )
+
+    private fun createTradeOutcomeVisionModel(modelName: String) =
+        Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
+            modelName = modelName,
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = TRADE_OUTCOME_SCHEMA
             },
         )
 
@@ -292,6 +314,7 @@ open class GeminiShieldRepository {
         pageUrl: String,
         domControlsSummary: String,
         previousScreenshot: Bitmap? = null,
+        learningContext: String = "",
     ): TradeSignalDecision {
         val personalCfg = resolvePersonalKeyConfig()
         if (personalCfg != null && personalCfg.second) {
@@ -301,75 +324,181 @@ open class GeminiShieldRepository {
                 pageUrl = pageUrl,
                 domControlsSummary = domControlsSummary,
                 previousScreenshot = previousScreenshot,
+                learningContext = learningContext,
             )
         }
 
-        val promptText = buildTradeAnalysisPrompt(
-            pageUrl = pageUrl,
-            domControlsSummary = domControlsSummary,
-            hasTwoFrames = previousScreenshot != null,
-        )
-        val multimodalInput = content {
-            if (previousScreenshot != null) {
-                text("FRAME A (~0.9s earlier):")
-                image(previousScreenshot)
-                text("FRAME B (CURRENT LIVE SCREEN RIGHT NOW):")
-            }
-            image(screenshot)
-            text(promptText)
-        }
-        val plan = listOf(
-            tradeVisionModel to 28_000L,
-            fallbackTradeVisionModel to 32_000L,
-        )
-        var lastError: Exception? = null
+        val primaryScaled = downscaleBitmapIfNeeded(screenshot, MAX_LIVE_FRAME_PX)
+        val priorScaled = previousScreenshot?.let { downscaleBitmapIfNeeded(it, MAX_PRIOR_FRAME_PX) }
 
-        for ((attemptIdx, step) in plan.withIndex()) {
-            val (candidate, attemptTimeoutMs) = step
-            try {
-                val jsonText = withTimeout(attemptTimeoutMs) {
-                    candidate.generateContent(multimodalInput).text
+        try {
+            val dualPrompt = buildTradeAnalysisPrompt(
+                pageUrl = pageUrl,
+                domControlsSummary = domControlsSummary,
+                hasTwoFrames = priorScaled != null,
+                learningContext = learningContext,
+            )
+            val dualInput = content {
+                if (priorScaled != null) {
+                    text("FRAME A (~0.7s earlier):")
+                    image(priorScaled)
+                    text("FRAME B (CURRENT LIVE SCREEN RIGHT NOW):")
                 }
-                if (!jsonText.isNullOrBlank()) {
-                    return parseTradeDecisionJson(jsonText)
-                }
-                if (attemptIdx < plan.lastIndex) {
-                    delay(FALLBACK_DELAY_MS)
-                }
-            } catch (e: TimeoutCancellationException) {
-                if (!currentCoroutineContext().isActive) throw e
-                lastError = e
-                if (attemptIdx == plan.lastIndex) {
+                image(primaryScaled)
+                text(dualPrompt)
+            }
+            val singlePrompt = buildTradeAnalysisPrompt(
+                pageUrl = pageUrl,
+                domControlsSummary = domControlsSummary,
+                hasTwoFrames = false,
+                learningContext = learningContext,
+            )
+            val singleInput = content {
+                image(primaryScaled)
+                text(singlePrompt)
+            }
+
+            // Tiered plan: 2-frame primary -> 2-frame lite -> 1-frame lite -> 1-frame primary
+            val plan = if (priorScaled != null) {
+                listOf(
+                    Triple(tradeVisionModel, dualInput, 40_000L),
+                    Triple(fallbackTradeVisionModel, dualInput, 40_000L),
+                    Triple(fallbackTradeVisionModel, singleInput, 35_000L),
+                    Triple(tradeVisionModel, singleInput, 40_000L),
+                )
+            } else {
+                listOf(
+                    Triple(tradeVisionModel, singleInput, 40_000L),
+                    Triple(fallbackTradeVisionModel, singleInput, 40_000L),
+                )
+            }
+            val backoffDelaysMs = longArrayOf(800L, 1_400L, 2_000L)
+            var lastError: Exception? = null
+
+            for ((attemptIdx, step) in plan.withIndex()) {
+                val (candidate, payload, attemptTimeoutMs) = step
+                try {
+                    val jsonText = withTimeout(attemptTimeoutMs) {
+                        candidate.generateContent(payload).text
+                    }
+                    if (!jsonText.isNullOrBlank()) {
+                        return parseTradeDecisionJson(jsonText)
+                    }
+                    if (attemptIdx < plan.lastIndex) {
+                        delay(backoffDelaysMs.getOrElse(attemptIdx) { 1_200L })
+                    }
+                } catch (e: TimeoutCancellationException) {
+                    if (!currentCoroutineContext().isActive) throw e
+                    Log.w(TAG, "Trade vision attempt ${attemptIdx + 1} timed out after ${attemptTimeoutMs}ms")
+                    lastError = e
+                    if (attemptIdx == plan.lastIndex) {
+                        throw e
+                    }
+                    delay(backoffDelaysMs.getOrElse(attemptIdx) { 1_200L })
+                } catch (e: CancellationException) {
                     throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Trade vision attempt ${attemptIdx + 1} failed: ${e::class.java.simpleName}: ${e.message}")
+                    if (personalCfg != null && isAppCheckOrAttestationError(e)) {
+                        return personalRestClient.analyzeScreenForTradeSignal(
+                            apiKey = personalCfg.first,
+                            screenshot = primaryScaled,
+                            pageUrl = pageUrl,
+                            domControlsSummary = domControlsSummary,
+                            previousScreenshot = priorScaled,
+                            learningContext = learningContext,
+                        )
+                    }
+                    if (!isTransientHighDemandError(e) || attemptIdx == plan.lastIndex) {
+                        throw e
+                    }
+                    lastError = e
+                    delay(backoffDelaysMs.getOrElse(attemptIdx) { 1_200L })
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                if (personalCfg != null && isAppCheckOrAttestationError(e)) {
-                    return personalRestClient.analyzeScreenForTradeSignal(
-                        apiKey = personalCfg.first,
-                        screenshot = screenshot,
-                        pageUrl = pageUrl,
-                        domControlsSummary = domControlsSummary,
-                        previousScreenshot = previousScreenshot,
-                    )
-                }
-                if (!isTransientHighDemandError(e) || attemptIdx == plan.lastIndex) {
-                    throw e
-                }
-                lastError = e
-                delay(FALLBACK_DELAY_MS)
+            }
+            throw lastError ?: IllegalStateException("Gemini Vision returned an empty chart analysis response.")
+        } finally {
+            if (primaryScaled !== screenshot) {
+                runCatching { primaryScaled.recycle() }
+            }
+            if (priorScaled != null && priorScaled !== previousScreenshot) {
+                runCatching { priorScaled.recycle() }
             }
         }
-        throw lastError ?: IllegalStateException("Gemini Vision returned an empty chart analysis response.")
+    }
+
+    open suspend fun verifyTradeOutcomeWithVision(
+        screenshot: Bitmap,
+        pending: PendingTradeSnapshot,
+    ): TradeOutcomeVerification {
+        val personalCfg = resolvePersonalKeyConfig()
+        if (personalCfg != null && personalCfg.second) {
+            return personalRestClient.verifyTradeOutcomeWithVision(
+                apiKey = personalCfg.first,
+                screenshot = screenshot,
+                pending = pending,
+            )
+        }
+
+        val scaled = downscaleBitmapIfNeeded(screenshot, MAX_PRIOR_FRAME_PX)
+        val prompt = buildTradeOutcomeVerificationPrompt(pending)
+        val payload = content {
+            image(scaled)
+            text(prompt)
+        }
+        try {
+            val candidates = listOf(fallbackTradeOutcomeVisionModel, tradeOutcomeVisionModel)
+            for ((idx, model) in candidates.withIndex()) {
+                try {
+                    val jsonText = withTimeout(30_000L) {
+                        model.generateContent(payload).text
+                    }
+                    if (!jsonText.isNullOrBlank()) {
+                        return parseTradeOutcomeVerificationJson(jsonText)
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (personalCfg != null && isAppCheckOrAttestationError(e)) {
+                        return personalRestClient.verifyTradeOutcomeWithVision(
+                            apiKey = personalCfg.first,
+                            screenshot = scaled,
+                            pending = pending,
+                        )
+                    }
+                    if (idx == candidates.lastIndex) {
+                        Log.w(TAG, "Outcome vision check failed: ${e.message}")
+                    } else {
+                        delay(700L)
+                    }
+                }
+            }
+            return TradeOutcomeVerification(outcome = null)
+        } finally {
+            if (scaled !== screenshot) {
+                runCatching { scaled.recycle() }
+            }
+        }
     }
 
     companion object {
+        private const val TAG = "GeminiShieldRepo"
         const val MODEL_NAME = "gemini-3.8-flash"
         const val FALLBACK_MODEL_NAME = "gemini-3.5-flash-lite"
-        private const val PRIMARY_ATTEMPT_TIMEOUT_MS = 15_000L
-        private const val FALLBACK_ATTEMPT_TIMEOUT_MS = 18_000L
-        private const val FALLBACK_DELAY_MS = 300L
+        private const val PRIMARY_ATTEMPT_TIMEOUT_MS = 18_000L
+        private const val FALLBACK_ATTEMPT_TIMEOUT_MS = 24_000L
+        private const val FALLBACK_DELAY_MS = 400L
+        private const val MAX_PRIOR_FRAME_PX = 600
+        private const val MAX_LIVE_FRAME_PX = 768
+
+        internal fun downscaleBitmapIfNeeded(bitmap: Bitmap, maxDimensionPx: Int): Bitmap {
+            val maxSide = maxOf(bitmap.width, bitmap.height)
+            if (maxSide <= maxDimensionPx || maxDimensionPx <= 0) return bitmap
+            val scale = maxDimensionPx.toFloat() / maxSide.toFloat()
+            val targetW = (bitmap.width * scale).toInt().coerceAtLeast(1)
+            val targetH = (bitmap.height * scale).toInt().coerceAtLeast(1)
+            return Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
+        }
 
         const val TRADE_ANALYST_SYSTEM_INSTRUCTION =
             "You are an expert short-term binary options and price-action trading analyst inspecting live chart screenshots. " +
@@ -404,7 +533,7 @@ open class GeminiShieldRepository {
         }
 
         fun isTransientHighDemandError(error: Throwable): Boolean {
-            if (error is TimeoutCancellationException) return true
+            if (error is TimeoutCancellationException || error is java.net.SocketTimeoutException) return true
             if (isAppCheckOrAttestationError(error)) return false
             val className = error::class.java.simpleName.lowercase()
             if (className.contains("serviceunavailable") || className.contains("quotaexceeded")) {
@@ -419,8 +548,7 @@ open class GeminiShieldRepository {
             return combinedMsg.contains("high demand") ||
                 combinedMsg.contains("spikes in demand") ||
                 combinedMsg.contains("overloaded") ||
-                combinedMsg.contains("temporarily unavailable") ||
-                combinedMsg.contains("service unavailable") ||
+                combinedMsg.contains("unavailable") ||
                 combinedMsg.contains("resource exhausted") ||
                 combinedMsg.contains("rate limit") ||
                 combinedMsg.contains("too many requests") ||
@@ -430,6 +558,7 @@ open class GeminiShieldRepository {
                 combinedMsg.contains("503") ||
                 combinedMsg.contains("504") ||
                 combinedMsg.contains("502") ||
+                combinedMsg.contains("500") ||
                 combinedMsg.contains("429")
         }
 
@@ -481,6 +610,21 @@ open class GeminiShieldRepository {
                 ),
                 "normalizedY" to Schema.double(
                     description = "Normalized vertical center coordinate (0.0 top edge to 1.0 bottom edge) of the target BUY or SELL button, or 0.5 if HOLD",
+                ),
+            ),
+        )
+
+        val TRADE_OUTCOME_SCHEMA = Schema.obj(
+            properties = mapOf(
+                "outcome" to Schema.enumeration(
+                    values = listOf("WIN", "LOSS", "PENDING"),
+                    description = "Whether the executed binary/short-term trade clearly ended in profit (WIN), closed at a loss (LOSS), or is still counting down (PENDING)",
+                ),
+                "profitDeltaText" to Schema.string(
+                    description = "Visible profit/payout or loss amount such as +93.00, -50.00, or NONE",
+                ),
+                "lessonLearned" to Schema.string(
+                    description = "Concise 1-sentence technical reflection: why the entry worked or what chart mistake caused the loss so future trades avoid repeating it",
                 ),
             ),
         )
@@ -557,10 +701,11 @@ open class GeminiShieldRepository {
             pageUrl: String,
             domControlsSummary: String,
             hasTwoFrames: Boolean = false,
+            learningContext: String = "",
         ): String = buildString {
             appendLine(
                 if (hasTwoFrames) {
-                    "You are given TWO sequential live frames (FRAME A ~0.9s earlier, FRAME B current live screen). Compare them closely and decide BUY or SELL."
+                    "You are given TWO sequential live frames (FRAME A ~0.7s earlier, FRAME B current live screen). Compare them closely and decide BUY or SELL."
                 } else {
                     "Examine this live trading chart screenshot closely and decide BUY or SELL."
                 },
@@ -582,11 +727,49 @@ open class GeminiShieldRepository {
             appendLine("   - In choppy/sideways oscillation: trade the active swing edge (BUY near lower half / support hook-up; SELL near upper half / resistance turn-down). Do NOT output HOLD 0% for active volatility!")
             appendLine("4. Output calibrated confidence 60-94 for BUY or SELL whenever chart + Buy/Sell buttons are visible. Use HOLD only if no trading chart or Buy/Sell buttons exist on screen.")
             appendLine("5. Return exact normalized center (0.0 to 1.0) of the chosen BUY (usually green/right) or SELL (usually red/left) button.")
+            if (learningContext.isNotBlank()) {
+                appendLine()
+                appendLine(learningContext)
+            }
             if (domControlsSummary.isNotBlank()) {
                 appendLine()
                 appendLine("Detected DOM control hints (viewport-relative):")
                 appendLine(domControlsSummary)
             }
+        }
+
+        fun buildTradeOutcomeVerificationPrompt(pending: PendingTradeSnapshot): String = buildString {
+            appendLine("Verify the outcome of our recently executed trade on this live screen.")
+            appendLine("- Executed Action: ${pending.decision.name} on ${pending.assetName} (${pending.accountMode})")
+            appendLine("- Entry Confidence: ${pending.confidence}% | Setup: ${pending.marketBias}")
+            appendLine("- Entry Reasoning: ${pending.reasoning}")
+            if (pending.preClickBalance != null) {
+                appendLine("- Balance Before Trade: ${pending.preClickBalance}")
+            }
+            appendLine()
+            appendLine("Inspect:")
+            appendLine("1. Look for profit/payout popup, green +amount tag, red settled loss, balance jump above/below pre-click balance, or recent strike marker above/below current price line.")
+            appendLine("2. Output outcome='WIN' if clearly won, 'LOSS' if clearly lost, or 'PENDING' if strike timer is still active or result is unclear.")
+            appendLine("3. Provide a concrete 1-sentence technical lessonLearned: if LOSS, explain the exact chart mistake (e.g. entered into resistance/sideways chop/counter-trend spike); if WIN, note why the momentum/level timing succeeded.")
+        }
+
+        fun parseTradeOutcomeVerificationJson(rawJson: String): TradeOutcomeVerification {
+            val map = com.example.browser.TradePilotHelper.parseFlatJsonObject(rawJson)
+            val rawOutcome = map["outcome"]?.trim()?.uppercase().orEmpty()
+            val outcome = when (rawOutcome) {
+                "WIN", "WON", "PROFIT" -> TradeOutcome.WIN
+                "LOSS", "LOST", "LOSE" -> TradeOutcome.LOSS
+                else -> null
+            }
+            val profitText = map["profitDeltaText"].orEmpty()
+            val profitDelta = TradeLearningEngine.extractCurrencyNumber(profitText)
+                ?: Regex("""[-+]?\d[\d,]*(?:\.\d+)?""").find(profitText)?.value?.replace(",", "")?.toDoubleOrNull()
+            val lesson = map["lessonLearned"]?.trim().orEmpty()
+            return TradeOutcomeVerification(
+                outcome = outcome,
+                profitDelta = profitDelta,
+                lessonLearned = lesson,
+            )
         }
 
         fun parseTradeDecisionJson(rawJson: String): TradeSignalDecision {

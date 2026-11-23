@@ -4,6 +4,10 @@ import com.example.browser.DetectedTradeButton
 import com.example.browser.DownloadFileHelper
 import com.example.browser.PrivacyScripts
 import com.example.browser.TradeDecision
+import com.example.browser.TradeDomSnapshot
+import com.example.browser.TradeLearningEngine
+import com.example.browser.TradeLearningProfile
+import com.example.browser.TradeOutcome
 import com.example.browser.TradePilotHelper
 import com.example.browser.TradeSignalDecision
 import com.example.browser.WebsiteLogoCache
@@ -105,6 +109,7 @@ class ExampleUnitTest {
         assertTrue(script.contains("__osWebRtcGuardInstalled"))
         assertTrue(script.contains("__osFingerprintGuardInstalled"))
         assertTrue(script.contains("OnionShield Virtual GPU (SHORTS99)"))
+        assertTrue(script.contains("WebGL2RenderingContext"))
         assertTrue(script.contains("isShortsRoute"))
         assertTrue(script.contains("isElementInViewport"))
         assertTrue(script.contains("visibleMediaArea"))
@@ -117,6 +122,12 @@ class ExampleUnitTest {
         assertTrue(blobScript.contains("__osPeekBlobHint"))
         assertTrue(blobScript.contains("__osFetchBlobForDownload"))
         assertTrue(blobScript.contains("OnionShieldDownloadBridge"))
+
+        val webGlGuardScript = PrivacyScripts.buildWebGlMipmapGuardScript()
+        assertTrue(webGlGuardScript.contains("__osWebGlMipmapGuardInstalled"))
+        assertTrue(webGlGuardScript.contains("generateMipmap"))
+        assertTrue(webGlGuardScript.contains("texStorage2D"))
+        assertTrue(webGlGuardScript.contains("UNSUPPORTED_MIPMAP_FORMATS"))
     }
 
     @Test
@@ -262,6 +273,8 @@ class ExampleUnitTest {
         assertFalse(GeminiShieldRepository.isAppCheckOrAttestationError(RuntimeException("HTTP 503 Service Unavailable: high demand")))
         assertFalse(GeminiShieldRepository.isTransientHighDemandError(RuntimeException("HTTP 403 App Check token is invalid")))
         assertTrue(GeminiShieldRepository.isTransientHighDemandError(RuntimeException("HTTP 503 Service Unavailable")))
+        assertTrue(GeminiShieldRepository.isTransientHighDemandError(RuntimeException("The service is currently unavailable.")))
+        assertTrue(GeminiShieldRepository.isTransientHighDemandError(java.net.SocketTimeoutException("read timed out")))
     }
 
     @Test
@@ -289,5 +302,191 @@ class ExampleUnitTest {
             """{"decision": "SELL", "confidence": 82}""",
             GeminiPersonalRestClient.stripJsonCodeFences(fenced),
         )
+    }
+
+    @Test
+    fun tradeLearningEngine_tracksWinsLossesAdaptsThresholdsAndSerializesCleanly() {
+        val snap = TradeLearningEngine.parseDomSnapshot(
+            """{"balanceText":"৳1,107.50","timerText":"00:00:30","outcomeHint":"WIN","profitDelta":"107.5"}""",
+        )
+        assertEquals(1107.50, snap.balance ?: 0.0, 0.01)
+        assertEquals(30, snap.expirySeconds)
+        assertEquals("WIN", snap.outcomeHint)
+        assertEquals(107.5, snap.profitDelta ?: 0.0, 0.01)
+
+        val domWin = TradeLearningEngine.evaluateOutcomeFromDom(1000.0, snap)
+        assertNotNull(domWin)
+        assertEquals(TradeOutcome.WIN, domWin?.first)
+
+        val domLoss = TradeLearningEngine.evaluateOutcomeFromDom(
+            1000.0,
+            TradeDomSnapshot(balance = 875.0),
+        )
+        assertEquals(TradeOutcome.LOSS, domLoss?.first)
+        assertEquals(-125.0, domLoss?.second ?: 0.0, 0.01)
+
+        val neutralDom = TradeLearningEngine.evaluateOutcomeFromDom(
+            1000.0,
+            TradeDomSnapshot(balance = 1000.0),
+        )
+        assertNull(neutralDom)
+
+        var profile = TradeLearningProfile()
+        profile = TradeLearningEngine.recordOutcome(
+            profile = profile,
+            assetName = "EUR / USD (OTC)",
+            accountMode = "DEMO",
+            decision = TradeDecision.BUY,
+            confidence = 62,
+            marketBias = "Sideways",
+            reasoning = "Choppy mid-range entry",
+            outcome = TradeOutcome.LOSS,
+            profitDelta = -50.0,
+            aiReflectionLesson = "Avoid mid-range sideways BUY without clear breakout confirmation.",
+            timestampMs = 1_000L,
+            recordId = "trade_1",
+        )
+        assertEquals(0, profile.totalWins)
+        assertEquals(1, profile.totalLosses)
+        assertEquals(1, profile.buyLosses)
+        assertEquals(1, profile.currentLossStreak)
+        assertEquals(62, profile.adaptedMinConfidence)
+        assertEquals(10, profile.adaptedCooldownSec)
+
+        profile = TradeLearningEngine.recordOutcome(
+            profile = profile,
+            assetName = "EUR / USD (OTC)",
+            accountMode = "DEMO",
+            decision = TradeDecision.SELL,
+            confidence = 78,
+            marketBias = "Resistance Rejection",
+            reasoning = "Lower high rejection off ceiling",
+            outcome = TradeOutcome.WIN,
+            profitDelta = 93.0,
+            timestampMs = 2_000L,
+            recordId = "trade_2",
+        )
+        profile = TradeLearningEngine.recordOutcome(
+            profile = profile,
+            assetName = "EUR / USD (OTC)",
+            accountMode = "DEMO",
+            decision = TradeDecision.SELL,
+            confidence = 82,
+            marketBias = "Resistance Rejection",
+            reasoning = "Follow-through drop in Frame B",
+            outcome = TradeOutcome.WIN,
+            profitDelta = 93.0,
+            timestampMs = 3_000L,
+            recordId = "trade_3",
+        )
+        assertEquals(2, profile.totalWins)
+        assertEquals(1, profile.totalLosses)
+        assertEquals(67, profile.winRatePercent)
+        assertEquals(2, profile.currentWinStreak)
+        assertEquals(2, profile.bestWinStreak)
+        assertEquals(60, profile.adaptedMinConfidence)
+
+        val memory = TradeLearningEngine.buildPromptMemoryContext(profile)
+        assertTrue(memory.contains("2 Wins / 1 Losses"))
+        assertTrue(memory.contains("sideways"))
+        assertTrue(memory.contains("resistance_reject"))
+        assertTrue(memory.contains("Avoid mid-range sideways BUY"))
+
+        val promptWithMemory = GeminiShieldRepository.buildTradeAnalysisPrompt(
+            pageUrl = "https://m.expertoption.com",
+            domControlsSummary = "",
+            hasTwoFrames = true,
+            learningContext = memory,
+        )
+        assertTrue(promptWithMemory.contains("Self-Learning Performance Memory"))
+
+        val serialized = TradeLearningEngine.serializeProfile(profile)
+        val restored = TradeLearningEngine.deserializeProfile(serialized)
+        assertEquals(profile.totalWins, restored.totalWins)
+        assertEquals(profile.totalLosses, restored.totalLosses)
+        assertEquals(profile.sellWins, restored.sellWins)
+        assertEquals(profile.buyLosses, restored.buyLosses)
+        assertEquals(profile.adaptedMinConfidence, restored.adaptedMinConfidence)
+        assertEquals(profile.learnedLessons, restored.learnedLessons)
+        assertEquals(profile.recentTrades.size, restored.recentTrades.size)
+        assertEquals(profile.patternStats["resistance_reject"]?.wins, restored.patternStats["resistance_reject"]?.wins)
+
+        val verified = GeminiShieldRepository.parseTradeOutcomeVerificationJson(
+            """{"outcome":"LOSS","profitDeltaText":"-৳125.00","lessonLearned":"Wait for candle close above support before BUY."}""",
+        )
+        assertEquals(TradeOutcome.LOSS, verified.outcome)
+        assertEquals(125.0, kotlin.math.abs(verified.profitDelta ?: 0.0), 0.01)
+        assertTrue(verified.lessonLearned.contains("Wait for candle close"))
+
+        // Verify Profit/Loss time-series curve generation
+        val emptySeries = TradeLearningEngine.buildProfitLossSeries(TradeLearningProfile())
+        assertTrue(emptySeries.points.isEmpty())
+
+        val currencySeries = TradeLearningEngine.buildProfitLossSeries(profile)
+        assertTrue(currencySeries.isCurrencySeries)
+        assertEquals(4, currencySeries.points.size) // baseline 0 + 3 trades
+        assertEquals(0.0, currencySeries.points[0].cumulativeValue, 0.01)
+        assertEquals(-50.0, currencySeries.points[1].cumulativeValue, 0.01)
+        assertEquals(43.0, currencySeries.points[2].cumulativeValue, 0.01)
+        assertEquals(136.0, currencySeries.points[3].cumulativeValue, 0.01)
+        assertEquals(136.0, currencySeries.netValue, 0.01)
+        assertEquals(136.0, currencySeries.peakValue, 0.01)
+        assertEquals(50.0, currencySeries.maxDrawdown, 0.01)
+
+        val manualProfile = TradeLearningEngine.recordOutcome(
+            profile = profile,
+            assetName = "GBP / USD",
+            accountMode = "DEMO",
+            decision = TradeDecision.BUY,
+            confidence = 72,
+            marketBias = "Pullback Bounce",
+            reasoning = "Manual loss tag",
+            outcome = TradeOutcome.LOSS,
+            profitDelta = null,
+            timestampMs = 4_000L,
+            recordId = "trade_4",
+        )
+        val unitSeries = TradeLearningEngine.buildProfitLossSeries(manualProfile)
+        assertFalse(unitSeries.isCurrencySeries)
+        assertEquals(5, unitSeries.points.size)
+        assertEquals(-1.0, unitSeries.points[1].cumulativeValue, 0.01)
+        assertEquals(0.0, unitSeries.points[2].cumulativeValue, 0.01)
+        assertEquals(1.0, unitSeries.points[3].cumulativeValue, 0.01)
+        assertEquals(0.0, unitSeries.points[4].cumulativeValue, 0.01)
+        assertEquals(1.0, unitSeries.peakValue, 0.01)
+        assertEquals(1.0, unitSeries.maxDrawdown, 0.01)
+
+        // Verify CSV export content, ordering, and escaping
+        val emptyCsv = TradeLearningEngine.exportTradesToCsv(TradeLearningProfile())
+        assertTrue(emptyCsv.startsWith("Trade #,Timestamp,Asset,Account Mode,Decision,Confidence %,Market Bias,Outcome,Profit/Loss,Cumulative P/L"))
+        assertEquals(1, emptyCsv.trim().lines().size)
+
+        val csv = TradeLearningEngine.exportTradesToCsv(profile)
+        val csvLines = csv.trim().lines()
+        assertEquals(4, csvLines.size) // header + 3 trades in chronological order
+        assertTrue(csvLines[1].startsWith("1,"))
+        assertTrue(csvLines[1].contains("EUR / USD (OTC),DEMO,BUY,62,Sideways,LOSS,-50.00,-50.00"))
+        assertTrue(csvLines[2].startsWith("2,"))
+        assertTrue(csvLines[2].contains(",SELL,78,Resistance Rejection,WIN,93.00,43.00"))
+        assertTrue(csvLines[3].startsWith("3,"))
+        assertTrue(csvLines[3].contains(",SELL,82,Resistance Rejection,WIN,93.00,136.00"))
+
+        val trickyProfile = TradeLearningEngine.recordOutcome(
+            profile = TradeLearningProfile(),
+            assetName = "BTC, \"USD\"",
+            accountMode = "REAL",
+            decision = TradeDecision.BUY,
+            confidence = 85,
+            marketBias = "Breakout",
+            reasoning = "Clean breakout, then\nretest",
+            outcome = TradeOutcome.WIN,
+            profitDelta = 120.5,
+            timestampMs = 5_000L,
+            recordId = "tricky_1",
+        )
+        val trickyCsv = TradeLearningEngine.exportTradesToCsv(trickyProfile)
+        assertTrue(trickyCsv.contains("\"BTC, \"\"USD\"\"\""))
+        assertTrue(trickyCsv.contains("\"Clean breakout, then retest\""))
+        assertTrue(TradeLearningEngine.buildCsvExportFileName(0L).endsWith(".csv"))
     }
 }

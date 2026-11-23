@@ -11,6 +11,8 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.browser.TradeLearningEngine
+import com.example.browser.TradeLearningProfile
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -65,6 +67,7 @@ class PrivacyPreferencesRepository(private val context: Context) {
         val SURFACE_DEVICE_SEED = stringPreferencesKey("surface_device_seed")
         val AUTHENTICATED_SESSION_HOSTS = stringSetPreferencesKey("authenticated_session_hosts")
         val AI_ASSISTANT_ENABLED = booleanPreferencesKey("ai_assistant_enabled")
+        val TRADE_LEARNING_PROFILE = stringPreferencesKey("trade_learning_profile")
     }
 
     val securityConfig: Flow<SecurityConfig> = context.privacyDataStore.data.map { prefs ->
@@ -148,6 +151,10 @@ class PrivacyPreferencesRepository(private val context: Context) {
 
     val authenticatedSessionHosts: Flow<Set<String>> = context.privacyDataStore.data.map { prefs ->
         prefs[Keys.AUTHENTICATED_SESSION_HOSTS] ?: emptySet()
+    }
+
+    val tradeLearningProfile: Flow<TradeLearningProfile> = context.privacyDataStore.data.map { prefs ->
+        TradeLearningEngine.deserializeProfile(prefs[Keys.TRADE_LEARNING_PROFILE])
     }
 
     suspend fun setBrowserMode(mode: BrowserMode) {
@@ -426,6 +433,18 @@ class PrivacyPreferencesRepository(private val context: Context) {
     suspend fun clearAuthenticatedSessionHosts() {
         context.privacyDataStore.edit { prefs ->
             prefs.remove(Keys.AUTHENTICATED_SESSION_HOSTS)
+        }
+    }
+
+    suspend fun saveTradeLearningProfile(profile: TradeLearningProfile) {
+        context.privacyDataStore.edit {
+            it[Keys.TRADE_LEARNING_PROFILE] = TradeLearningEngine.serializeProfile(profile)
+        }
+    }
+
+    suspend fun resetTradeLearningProfile() {
+        context.privacyDataStore.edit {
+            it.remove(Keys.TRADE_LEARNING_PROFILE)
         }
     }
 }

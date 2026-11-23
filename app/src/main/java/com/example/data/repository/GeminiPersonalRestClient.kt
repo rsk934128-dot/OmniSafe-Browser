@@ -2,6 +2,8 @@ package com.example.data.repository
 
 import android.graphics.Bitmap
 import android.util.Base64
+import com.example.browser.PendingTradeSnapshot
+import com.example.browser.TradeOutcomeVerification
 import com.example.browser.TradeSignalDecision
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -155,34 +157,37 @@ class GeminiPersonalRestClient(
         pageUrl: String,
         domControlsSummary: String,
         previousScreenshot: Bitmap? = null,
+        learningContext: String = "",
     ): TradeSignalDecision = withContext(Dispatchers.IO) {
         val modelName = resolveActiveModel(apiKey)
         val promptText = GeminiShieldRepository.buildTradeAnalysisPrompt(
             pageUrl = pageUrl,
             domControlsSummary = domControlsSummary,
             hasTwoFrames = previousScreenshot != null,
+            learningContext = learningContext,
         )
         val partsArray = JSONArray()
         if (previousScreenshot != null) {
             partsArray
-                .put(JSONObject().put("text", "FRAME A (~0.9s earlier):"))
+                .put(JSONObject().put("text", "FRAME A (~0.7s earlier):"))
                 .put(
                     JSONObject().put(
                         "inline_data",
                         JSONObject()
                             .put("mime_type", "image/jpeg")
-                            .put("data", encodeBitmapToJpegBase64(previousScreenshot)),
+                            .put("data", encodeBitmapToJpegBase64(previousScreenshot, maxDimensionPx = 600)),
                     ),
                 )
                 .put(JSONObject().put("text", "FRAME B (CURRENT LIVE SCREEN RIGHT NOW):"))
         }
+        val liveFrameBase64 = encodeBitmapToJpegBase64(screenshot, maxDimensionPx = 768)
         partsArray
             .put(
                 JSONObject().put(
                     "inline_data",
                     JSONObject()
                         .put("mime_type", "image/jpeg")
-                        .put("data", encodeBitmapToJpegBase64(screenshot)),
+                        .put("data", liveFrameBase64),
                 ),
             )
             .put(JSONObject().put("text", promptText))
@@ -246,12 +251,113 @@ class GeminiPersonalRestClient(
                     .put("responseSchema", tradeSchema),
             )
 
-        val rawText = executeGenerateContentWithModelRetry(
-            apiKey = apiKey,
-            initialModel = modelName,
-            payload = body,
-        )
+        val rawText = try {
+            executeGenerateContentWithModelRetry(
+                apiKey = apiKey,
+                initialModel = modelName,
+                payload = body,
+            )
+        } catch (dualErr: Exception) {
+            if (previousScreenshot == null || !GeminiShieldRepository.isTransientHighDemandError(dualErr)) {
+                throw dualErr
+            }
+            val singleParts = JSONArray()
+                .put(
+                    JSONObject().put(
+                        "inline_data",
+                        JSONObject()
+                            .put("mime_type", "image/jpeg")
+                            .put("data", liveFrameBase64),
+                    ),
+                )
+                .put(
+                    JSONObject().put(
+                        "text",
+                        GeminiShieldRepository.buildTradeAnalysisPrompt(
+                            pageUrl = pageUrl,
+                            domControlsSummary = domControlsSummary,
+                            hasTwoFrames = false,
+                            learningContext = learningContext,
+                        ),
+                    ),
+                )
+            val singleBody = JSONObject(body.toString())
+                .put(
+                    "contents",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put("parts", singleParts),
+                    ),
+                )
+            executeGenerateContentWithModelRetry(
+                apiKey = apiKey,
+                initialModel = GeminiShieldRepository.FALLBACK_MODEL_NAME,
+                payload = singleBody,
+            )
+        }
         GeminiShieldRepository.parseTradeDecisionJson(stripJsonCodeFences(rawText))
+    }
+
+    suspend fun verifyTradeOutcomeWithVision(
+        apiKey: String,
+        screenshot: Bitmap,
+        pending: PendingTradeSnapshot,
+    ): TradeOutcomeVerification = withContext(Dispatchers.IO) {
+        val modelName = resolveActiveModel(apiKey)
+        val frameBase64 = encodeBitmapToJpegBase64(screenshot, maxDimensionPx = 600)
+        val prompt = GeminiShieldRepository.buildTradeOutcomeVerificationPrompt(pending)
+        val outcomeSchema = JSONObject()
+            .put("type", "OBJECT")
+            .put(
+                "properties",
+                JSONObject()
+                    .put(
+                        "outcome",
+                        JSONObject().put("type", "STRING").put("enum", JSONArray().put("WIN").put("LOSS").put("PENDING")),
+                    )
+                    .put("profitDeltaText", JSONObject().put("type", "STRING"))
+                    .put("lessonLearned", JSONObject().put("type", "STRING")),
+            )
+            .put("required", JSONArray().put("outcome").put("profitDeltaText").put("lessonLearned"))
+
+        val body = JSONObject()
+            .put(
+                "contents",
+                JSONArray().put(
+                    JSONObject()
+                        .put("role", "user")
+                        .put(
+                            "parts",
+                            JSONArray()
+                                .put(
+                                    JSONObject().put(
+                                        "inline_data",
+                                        JSONObject()
+                                            .put("mime_type", "image/jpeg")
+                                            .put("data", frameBase64),
+                                    ),
+                                )
+                                .put(JSONObject().put("text", prompt)),
+                        ),
+                ),
+            )
+            .put(
+                "generationConfig",
+                JSONObject()
+                    .put("responseMimeType", "application/json")
+                    .put("responseSchema", outcomeSchema),
+            )
+
+        val rawText = runCatching {
+            executeGenerateContentWithModelRetry(
+                apiKey = apiKey,
+                initialModel = modelName,
+                payload = body,
+            )
+        }.getOrNull() ?: return@withContext TradeOutcomeVerification(outcome = null)
+
+        GeminiShieldRepository.parseTradeOutcomeVerificationJson(stripJsonCodeFences(rawText))
     }
 
     private fun resolveActiveModel(apiKey: String, forceRefresh: Boolean = false): String {
@@ -287,17 +393,35 @@ class GeminiPersonalRestClient(
         initialModel: String,
         payload: JSONObject,
     ): String {
-        return try {
-            executeGenerateContent(apiKey, initialModel, payload)
-        } catch (firstErr: GeminiRestHttpException) {
-            if (firstErr.statusCode == 404 || firstErr.statusCode == 400) {
-                val refreshedModel = resolveActiveModel(apiKey, forceRefresh = true)
-                val fallback = if (refreshedModel != initialModel) refreshedModel else GeminiShieldRepository.FALLBACK_MODEL_NAME
-                executeGenerateContent(apiKey, fallback, payload)
-            } else {
-                throw firstErr
+        val candidates = linkedSetOf(
+            initialModel,
+            GeminiShieldRepository.FALLBACK_MODEL_NAME,
+            GeminiShieldRepository.MODEL_NAME,
+        ).toList()
+        var lastErr: Exception? = null
+        for ((idx, modelCandidate) in candidates.withIndex()) {
+            try {
+                return executeGenerateContent(apiKey, modelCandidate, payload)
+            } catch (err: GeminiRestHttpException) {
+                lastErr = err
+                val retryable = err.statusCode in setOf(400, 404, 429, 500, 502, 503, 504)
+                if (!retryable || idx == candidates.lastIndex) {
+                    throw err
+                }
+                if (err.statusCode == 404 || err.statusCode == 400) {
+                    resolveActiveModel(apiKey, forceRefresh = true)
+                } else {
+                    Thread.sleep(900L)
+                }
+            } catch (err: java.io.IOException) {
+                lastErr = err
+                if (idx == candidates.lastIndex) {
+                    throw err
+                }
+                Thread.sleep(900L)
             }
         }
+        throw lastErr ?: IllegalStateException("Gemini REST request failed.")
     }
 
     private fun executeGenerateContent(
@@ -327,10 +451,17 @@ class GeminiPersonalRestClient(
         }
     }
 
-    private fun encodeBitmapToJpegBase64(bitmap: Bitmap): String {
-        val out = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 82, out)
-        return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+    private fun encodeBitmapToJpegBase64(bitmap: Bitmap, maxDimensionPx: Int = 768): String {
+        val scaled = GeminiShieldRepository.downscaleBitmapIfNeeded(bitmap, maxDimensionPx)
+        return try {
+            val out = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, 76, out)
+            Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        } finally {
+            if (scaled !== bitmap) {
+                runCatching { scaled.recycle() }
+            }
+        }
     }
 
     private fun extractCandidateText(rawBody: String): String {

@@ -12,6 +12,9 @@ import java.nio.charset.StandardCharsets
 
 object TrackerAndUrlEngine {
 
+    private val TRANSPARENT_1X1_SVG_BYTES =
+        """<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>""".toByteArray(StandardCharsets.UTF_8)
+
     private val blockedAdAndTrackerDomains = setOf(
         // Major ad networks & exchanges
         "doubleclick.net",
@@ -251,11 +254,25 @@ object TrackerAndUrlEngine {
 
     fun emptyBlockedResponseForUrl(url: String?): WebResourceResponse {
         val path = runCatching { Uri.parse(url.orEmpty()).path?.lowercase() }.getOrNull().orEmpty()
+        val isImagePath = path.endsWith(".png") ||
+            path.endsWith(".jpg") ||
+            path.endsWith(".jpeg") ||
+            path.endsWith(".gif") ||
+            path.endsWith(".webp") ||
+            path.endsWith(".svg")
+        if (isImagePath) {
+            return WebResourceResponse(
+                "image/svg+xml",
+                "utf-8",
+                200,
+                "OK",
+                mapOf("X-OnionShield-Blocked" to "true"),
+                ByteArrayInputStream(TRANSPARENT_1X1_SVG_BYTES),
+            )
+        }
         val mimeType = when {
             path.endsWith(".js") || path.endsWith(".mjs") -> "application/javascript"
             path.endsWith(".css") -> "text/css"
-            path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".jpeg") ||
-                path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".svg") -> "image/png"
             else -> "text/plain"
         }
         return WebResourceResponse(

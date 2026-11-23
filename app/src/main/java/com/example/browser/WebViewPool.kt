@@ -386,6 +386,39 @@ class WebViewPool(
         }
     }
 
+    fun probeTradeOutcomeDomSnapshot(
+        tabId: String,
+        onResult: (TradeDomSnapshot) -> Unit,
+    ) {
+        val wv = pool[tabId]
+        if (wv == null) {
+            onResult(TradeDomSnapshot())
+            return
+        }
+        mainHandler.post {
+            val completed = AtomicBoolean(false)
+            val timeoutRunnable = Runnable {
+                if (completed.compareAndSet(false, true)) {
+                    onResult(TradeDomSnapshot())
+                }
+            }
+            mainHandler.postDelayed(timeoutRunnable, 1000L)
+            runCatching {
+                wv.evaluateJavascript(TradeLearningEngine.TRADE_OUTCOME_PROBE_SCRIPT) { rawJson ->
+                    if (completed.compareAndSet(false, true)) {
+                        mainHandler.removeCallbacks(timeoutRunnable)
+                        onResult(TradeLearningEngine.parseDomSnapshot(rawJson))
+                    }
+                }
+            }.onFailure {
+                if (completed.compareAndSet(false, true)) {
+                    mainHandler.removeCallbacks(timeoutRunnable)
+                    onResult(TradeDomSnapshot())
+                }
+            }
+        }
+    }
+
     fun dispatchWebViewClick(
         tabId: String,
         normX: Float,
@@ -515,8 +548,11 @@ class WebViewPool(
             enableBackgroundMediaPlayback = currentConfig.backgroundMediaPlaybackEnabled,
         )
         val blobHelperScript = PrivacyScripts.buildBlobDownloadHelperScript()
+        val webGlGuardScript = PrivacyScripts.buildWebGlMipmapGuardScript()
         injectedScriptKeysForTab[tabId] = scriptKey
         val combinedScript = buildString {
+            append(webGlGuardScript)
+            append('\n')
             if (hardeningScript.isNotEmpty()) {
                 append(hardeningScript)
                 append('\n')

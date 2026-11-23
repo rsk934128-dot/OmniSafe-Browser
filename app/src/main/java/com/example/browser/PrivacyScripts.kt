@@ -131,12 +131,19 @@ object PrivacyScripts {
                           return origToDataURL.apply(this, arguments);
                         };
 
-                        const origGetParam = WebGLRenderingContext.prototype.getParameter;
-                        WebGLRenderingContext.prototype.getParameter = function(param) {
-                          if (param === 37445) return 'Generic Privacy Renderer';
-                          if (param === 37446) return 'OnionShield Virtual GPU ($seed)';
-                          return origGetParam.apply(this, arguments);
+                        const spoofGetParam = function(origFn) {
+                          return function(param) {
+                            if (param === 37445) return 'Generic Privacy Renderer';
+                            if (param === 37446) return 'OnionShield Virtual GPU ($seed)';
+                            return origFn.apply(this, arguments);
+                          };
                         };
+                        if (typeof WebGLRenderingContext !== 'undefined' && WebGLRenderingContext.prototype && WebGLRenderingContext.prototype.getParameter) {
+                          WebGLRenderingContext.prototype.getParameter = spoofGetParam(WebGLRenderingContext.prototype.getParameter);
+                        }
+                        if (typeof WebGL2RenderingContext !== 'undefined' && WebGL2RenderingContext.prototype && WebGL2RenderingContext.prototype.getParameter) {
+                          WebGL2RenderingContext.prototype.getParameter = spoofGetParam(WebGL2RenderingContext.prototype.getParameter);
+                        }
                       }
                     } catch (e) {}
                     """.trimIndent()
@@ -996,4 +1003,251 @@ object PrivacyScripts {
             })();
         """.trimIndent()
     }
+
+    /**
+     * Prevents Chromium WebGL `GL_INVALID_OPERATION : glGenerateMipmap: Can not generate mips`
+     * when pages invoke `generateMipmap` on 0x0 unloaded textures, WebGL1 NPOT textures,
+     * single-level texStorage2D textures, compressed textures, or non-filterable float/depth formats.
+     */
+    fun buildWebGlMipmapGuardScript(): String = """
+        (function() {
+          'use strict';
+          try {
+            if (window.__osWebGlMipmapGuardInstalled) return;
+            window.__osWebGlMipmapGuardInstalled = true;
+
+            const isPow2 = function(n) {
+              return typeof n === 'number' && n > 0 && (n & (n - 1)) === 0;
+            };
+
+            const getSourceDims = function(src) {
+              if (!src) return null;
+              if (typeof src.videoWidth === 'number' && typeof src.videoHeight === 'number') {
+                return { w: src.videoWidth | 0, h: src.videoHeight | 0 };
+              }
+              if (typeof src.naturalWidth === 'number' && typeof src.naturalHeight === 'number') {
+                return { w: (src.naturalWidth || src.width || 0) | 0, h: (src.naturalHeight || src.height || 0) | 0 };
+              }
+              if (typeof src.width === 'number' && typeof src.height === 'number') {
+                return { w: src.width | 0, h: src.height | 0 };
+              }
+              return null;
+            };
+
+            const UNSUPPORTED_MIPMAP_FORMATS = new Set([
+              0x1902, 0x81A5, 0x81A6, 0x81A7,
+              0x8CAC, 0x8CAD, 0x88F0, 0x84F9,
+              0x8C40, 0x8C41, 0x8C3D,
+              0x8814, 0x8815, 0x822E, 0x8230,
+              0x8D70, 0x8D71, 0x8D72, 0x8D73, 0x8D74, 0x8D75,
+              0x8D76, 0x8D77, 0x8D78, 0x8D79, 0x8D7A, 0x8D7B,
+              0x8D7C, 0x8D7D, 0x8D7E, 0x8D7F,
+              0x8D82, 0x8D83, 0x8D84, 0x8D85, 0x8D88, 0x8D89, 0x8D8A, 0x8D8E, 0x8D8F,
+              0x8231, 0x8232, 0x8233, 0x8234, 0x8235, 0x8236,
+              0x8237, 0x8238, 0x8239, 0x823A, 0x823B, 0x823C,
+              0x83F0, 0x83F1, 0x83F2, 0x83F3
+            ]);
+            const HALF_FLOAT_FORMATS = new Set([0x881A, 0x881B, 0x822D, 0x822F]);
+
+            const patchProto = function(Proto, isWebGL2) {
+              if (!Proto || Proto.__osMipmapGuarded) return;
+              Proto.__osMipmapGuarded = true;
+
+              const origActiveTexture = Proto.activeTexture;
+              const origBindTexture = Proto.bindTexture;
+              const origTexImage2D = Proto.texImage2D;
+              const origCopyTexImage2D = Proto.copyTexImage2D;
+              const origCompressedTexImage2D = Proto.compressedTexImage2D;
+              const origTexStorage2D = Proto.texStorage2D;
+              const origTexParameteri = Proto.texParameteri;
+              const origGetExtension = Proto.getExtension;
+              const origGenerateMipmap = Proto.generateMipmap;
+
+              const ctxStateMap = new WeakMap();
+              const getState = function(gl) {
+                let st = ctxStateMap.get(gl);
+                if (!st) {
+                  st = {
+                    activeUnit: 0x84C0,
+                    bindings: {},
+                    texMeta: new WeakMap(),
+                    hasFloatColorBuffer: false
+                  };
+                  ctxStateMap.set(gl, st);
+                }
+                return st;
+              };
+
+              const normTarget = function(target) {
+                return (target >= 0x8515 && target <= 0x851A) ? 0x8513 : target;
+              };
+
+              const getBoundTex = function(gl, target) {
+                const st = getState(gl);
+                return st.bindings[st.activeUnit + ':' + normTarget(target)] || null;
+              };
+
+              if (typeof origGetExtension === 'function') {
+                Proto.getExtension = function(name) {
+                  const ext = origGetExtension.apply(this, arguments);
+                  if (ext && (name === 'EXT_color_buffer_float' || name === 'EXT_color_buffer_half_float')) {
+                    try { getState(this).hasFloatColorBuffer = true; } catch (_) {}
+                  }
+                  return ext;
+                };
+              }
+
+              if (typeof origActiveTexture === 'function') {
+                Proto.activeTexture = function(unit) {
+                  try { getState(this).activeUnit = unit; } catch (_) {}
+                  return origActiveTexture.apply(this, arguments);
+                };
+              }
+
+              if (typeof origBindTexture === 'function') {
+                Proto.bindTexture = function(target, texture) {
+                  try {
+                    const st = getState(this);
+                    st.bindings[st.activeUnit + ':' + normTarget(target)] = texture || null;
+                  } catch (_) {}
+                  return origBindTexture.apply(this, arguments);
+                };
+              }
+
+              if (typeof origTexImage2D === 'function') {
+                Proto.texImage2D = function(target, level, internalformat) {
+                  try {
+                    if ((level | 0) === 0) {
+                      const tex = getBoundTex(this, target);
+                      if (tex) {
+                        let w = 0;
+                        let h = 0;
+                        if (arguments.length >= 9) {
+                          w = arguments[3] | 0;
+                          h = arguments[4] | 0;
+                        } else if (arguments.length === 6) {
+                          const dims = getSourceDims(arguments[5]);
+                          if (dims) {
+                            w = dims.w;
+                            h = dims.h;
+                          }
+                        }
+                        getState(this).texMeta.set(tex, {
+                          w: w,
+                          h: h,
+                          internalformat: internalformat | 0,
+                          isStorage: false,
+                          levels: 0,
+                          isCompressed: false
+                        });
+                      }
+                    }
+                  } catch (_) {}
+                  return origTexImage2D.apply(this, arguments);
+                };
+              }
+
+              if (typeof origCopyTexImage2D === 'function') {
+                Proto.copyTexImage2D = function(target, level, internalformat, x, y, width, height) {
+                  try {
+                    if ((level | 0) === 0) {
+                      const tex = getBoundTex(this, target);
+                      if (tex) {
+                        getState(this).texMeta.set(tex, {
+                          w: width | 0,
+                          h: height | 0,
+                          internalformat: internalformat | 0,
+                          isStorage: false,
+                          levels: 0,
+                          isCompressed: false
+                        });
+                      }
+                    }
+                  } catch (_) {}
+                  return origCopyTexImage2D.apply(this, arguments);
+                };
+              }
+
+              if (typeof origCompressedTexImage2D === 'function') {
+                Proto.compressedTexImage2D = function(target, level, internalformat, width, height) {
+                  try {
+                    if ((level | 0) === 0) {
+                      const tex = getBoundTex(this, target);
+                      if (tex) {
+                        getState(this).texMeta.set(tex, {
+                          w: width | 0,
+                          h: height | 0,
+                          internalformat: internalformat | 0,
+                          isStorage: false,
+                          levels: 0,
+                          isCompressed: true
+                        });
+                      }
+                    }
+                  } catch (_) {}
+                  return origCompressedTexImage2D.apply(this, arguments);
+                };
+              }
+
+              if (typeof origTexStorage2D === 'function') {
+                Proto.texStorage2D = function(target, levels, internalformat, width, height) {
+                  try {
+                    const tex = getBoundTex(this, target);
+                    if (tex) {
+                      getState(this).texMeta.set(tex, {
+                        w: width | 0,
+                        h: height | 0,
+                        internalformat: internalformat | 0,
+                        isStorage: true,
+                        levels: levels | 0,
+                        isCompressed: false
+                      });
+                    }
+                  } catch (_) {}
+                  return origTexStorage2D.apply(this, arguments);
+                };
+              }
+
+              if (typeof origGenerateMipmap === 'function') {
+                Proto.generateMipmap = function(target) {
+                  try {
+                    const st = getState(this);
+                    const tex = getBoundTex(this, target);
+                    const meta = tex ? st.texMeta.get(tex) : null;
+                    const invalidDims = !meta || meta.w <= 0 || meta.h <= 0;
+                    const npotWebGl1 = !isWebGL2 && meta && (!isPow2(meta.w) || !isPow2(meta.h));
+                    const nonSquareCube = meta && normTarget(target) === 0x8513 && meta.w !== meta.h;
+                    const singleLevelStorage = meta && meta.isStorage && meta.levels <= 1;
+                    const unsupportedFmt = meta && (
+                      meta.isCompressed ||
+                      UNSUPPORTED_MIPMAP_FORMATS.has(meta.internalformat) ||
+                      (!st.hasFloatColorBuffer && HALF_FLOAT_FORMATS.has(meta.internalformat))
+                    );
+                    if (invalidDims || npotWebGl1 || nonSquareCube || singleLevelStorage || unsupportedFmt) {
+                      if (typeof origTexParameteri === 'function') {
+                        try {
+                          origTexParameteri.call(this, target, 0x2801, 0x2601);
+                          if (npotWebGl1) {
+                            origTexParameteri.call(this, target, 0x2802, 0x812F);
+                            origTexParameteri.call(this, target, 0x2803, 0x812F);
+                          }
+                        } catch (_) {}
+                      }
+                      return;
+                    }
+                  } catch (_) {}
+                  return origGenerateMipmap.apply(this, arguments);
+                };
+              }
+            };
+
+            if (typeof WebGLRenderingContext !== 'undefined') {
+              patchProto(WebGLRenderingContext.prototype, false);
+            }
+            if (typeof WebGL2RenderingContext !== 'undefined') {
+              patchProto(WebGL2RenderingContext.prototype, true);
+            }
+          } catch (_) {}
+        })();
+    """.trimIndent()
 }
